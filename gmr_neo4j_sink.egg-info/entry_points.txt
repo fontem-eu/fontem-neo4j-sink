@@ -1,0 +1,2 @@
+[console_scripts]
+neo4j-sink = neo4j_sink.__main__:main
