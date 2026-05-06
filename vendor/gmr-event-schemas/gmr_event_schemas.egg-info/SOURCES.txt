@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+gmr_event_schemas/__init__.py
+gmr_event_schemas/builders.py
+gmr_event_schemas/events.py
+gmr_event_schemas/loader.py
+gmr_event_schemas/validate.py
+gmr_event_schemas.egg-info/PKG-INFO
+gmr_event_schemas.egg-info/SOURCES.txt
+gmr_event_schemas.egg-info/dependency_links.txt
+gmr_event_schemas.egg-info/requires.txt
+gmr_event_schemas.egg-info/top_level.txt
+tests/test_examples.py

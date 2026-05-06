@@ -1,0 +1,11 @@
+{
+  "entity_id": "612d7f5a-91d9-58cf-b674-e543bb602fd7",
+  "eu_reference": "EU.1234.5",
+  "name": "ACME Petrochemicals OAO",
+  "aliases": ["AKME PetroChem"],
+  "nationality": "RU",
+  "designation_date": "2022-03-15",
+  "sanction_regime": "UKR",
+  "legal_basis": "Council Regulation (EU) 269/2014",
+  "listing_reason": "Material support to military operations."
+}

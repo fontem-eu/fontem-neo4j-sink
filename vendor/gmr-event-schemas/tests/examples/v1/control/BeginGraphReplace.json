@@ -1,0 +1,5 @@
+{
+  "graph_iri": "http://data.fontem.eu/graph/sanctions",
+  "label": "SanctionedEntity",
+  "domain": "sanctions"
+}

@@ -37,12 +37,15 @@ class Neo4jSink(EventConsumer):
                 os.environ["NEO4J_PASSWORD"],
             ),
         )
+        # Bracket state is sink-instance scope, NOT per-handle().
+        # A single Begin/EndGraphReplace bracket can span many
+        # handle() calls because batch_size caps each fetch.
+        self._bracket_writes: dict[str, list[CypherWrite]] = defaultdict(list)
+        self._bracket_label: dict[str, str] = {}
 
     def handle(self, batch: list[EventEnvelope]) -> None:
-        # bracket_writes[graph_iri] = list[CypherWrite]
-        bracket_writes: dict[str, list[CypherWrite]] = defaultdict(list)
-        # bracket_label[graph_iri] = "Company" | "SanctionedEntity" …
-        bracket_label: dict[str, str] = {}
+        bracket_writes = self._bracket_writes
+        bracket_label = self._bracket_label
 
         for ev in batch:
             if ev.event_type == "BeginGraphReplace":

@@ -1,0 +1,9 @@
+{
+  "a_iri": "http://data.fontem.eu/id/Company/00040372-dad6-5d34-882c-8b8624b4e734",
+  "b_iri": "http://data.fontem.eu/id/Company/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "confidence": 0.97,
+  "method": "lei_exact",
+  "tier": "hard_id",
+  "matched_via_alias": false,
+  "rule": "company_lei_exact"
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/control/BeginGraphReplace.json",
+  "title": "BeginGraphReplace",
+  "description": "Marker that opens a 'replace this whole named graph' bracket. The Virtuoso sink interprets the bracket as PUT semantics; the Neo4j sink turns it into 'delete-all-with-label-then-merge'. Sinks track open brackets per graph_iri so a misplaced End is a hard error rather than silent corruption.",
+  "type": "object",
+  "required": ["graph_iri", "label"],
+  "properties": {
+    "graph_iri": {
+      "type": "string",
+      "format": "uri",
+      "description": "Target named graph in Virtuoso. Same string is the partitioning key for the Neo4j sink's bulk-delete clause."
+    },
+    "label": {
+      "type": "string",
+      "description": "Neo4j node label that the bracket replaces. Used by the Neo4j sink to scope the bulk delete; ignored by the Virtuoso sink."
+    },
+    "domain": {
+      "type": "string",
+      "description": "Logical domain ('sanctions', 'cpv', 'authority', etc.). Used by sink batching + observability labels."
+    }
+  },
+  "additionalProperties": false
+}

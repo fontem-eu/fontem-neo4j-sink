@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/consolidation/AssertSameAs.json",
+  "title": "AssertSameAs",
+  "description": "Emitted by the consolidator after a confident match between two entities. Virtuoso sink writes <a> owl:sameAs <b> in the graph corresponding to the entity type and lets the OWL2-RL reasoner close the equivalence class. Neo4j sink writes a SAME_AS edge between the matched nodes (reviewed=false, confidence + tier carried forward) and lets the existing review-queue tooling pick it up.",
+  "type": "object",
+  "required": ["a_iri", "b_iri", "confidence", "method"],
+  "properties": {
+    "a_iri":      { "type": "string", "format": "uri", "description": "Canonical IRI of side A." },
+    "b_iri":      { "type": "string", "format": "uri", "description": "Canonical IRI of side B." },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "method":     { "type": "string", "description": "Resolver tier or rule name." },
+    "tier":       { "type": ["string", "null"] },
+    "matched_via_alias": { "type": "boolean" },
+    "rule":       { "type": ["string", "null"], "description": "Consolidator rule that produced this match." }
+  },
+  "additionalProperties": false
+}
