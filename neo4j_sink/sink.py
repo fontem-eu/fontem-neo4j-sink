@@ -165,6 +165,9 @@ class Neo4jSink(EventConsumer):
         if w.label == "_SameAs":
             self._apply_same_as(w)
             return
+        if w.label == "_Relationship":
+            self._apply_typed_relationship(w)
+            return
 
         keyset = tuple(sorted(w.primary_key.keys()))
         key_match = ", ".join(f"{k}: ${k}" for k in keyset)
@@ -203,6 +206,41 @@ class Neo4jSink(EventConsumer):
                 f"ON CREATE SET r += $props, r.reviewed = false",
                 ak=a_key, bk=b_key, props=w.set_props,
             )
+
+    def _apply_typed_relationship(self, w: CypherWrite) -> None:
+        """UpsertRelationship → resolve both IRIs to (label, key)
+        and MERGE a relationship of the given predicate name. The
+        predicate is sanitised (alphanumeric + underscore) and
+        UPPER_SNAKE_CASE'd to match Neo4j relationship-type
+        conventions."""
+        a_label, a_key = self._iri_to_label_key(w.primary_key["src_iri"])
+        b_label, b_key = self._iri_to_label_key(w.primary_key["dst_iri"])
+        rel_type = self._predicate_to_rel_type(w.primary_key["predicate"])
+        a_field = self._key_field(a_label)
+        b_field = self._key_field(b_label)
+        with self._driver.session() as session:
+            session.run(
+                f"MATCH (a:{a_label}), (b:{b_label}) "
+                f"WHERE a.{a_field} = $ak AND b.{b_field} = $bk "
+                f"MERGE (a)-[r:{rel_type}]->(b) "
+                f"SET r += $props",
+                ak=a_key, bk=b_key, props=w.set_props,
+            )
+
+    @staticmethod
+    def _predicate_to_rel_type(predicate: str) -> str:
+        """Map a fontem ontology predicate to a Neo4j rel-type name.
+        ``parentOf`` → ``PARENT_OF``; ``http://.../represents`` → ``REPRESENTS``."""
+        # Strip any IRI prefix.
+        local = predicate.rsplit("#", 1)[-1].rsplit("/", 1)[-1]
+        # camelCase → UPPER_SNAKE_CASE.
+        out = []
+        for ch in local:
+            if ch.isupper() and out and out[-1].islower():
+                out.append("_")
+            out.append(ch)
+        cleaned = "".join(c if c.isalnum() else "_" for c in "".join(out))
+        return cleaned.upper().strip("_") or "RELATED_TO"
 
     def _apply_relationship(
         self, src_label: str, src_key: dict,
@@ -250,4 +288,8 @@ class Neo4jSink(EventConsumer):
             return "authority_id"
         if label == "Contract":
             return "ted_notice_id"
+        if label in ("Cpv", "Nuts", "Mic", "FirdsInstrument"):
+            return "code"
+        if label == "ExchangeRate":
+            return "date"  # composite key, but date is the discriminator
         return "gmr_id"

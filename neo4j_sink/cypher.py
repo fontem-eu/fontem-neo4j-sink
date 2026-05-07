@@ -166,6 +166,108 @@ def render_upsert_contract(p: dict) -> CypherWrite:
     )
 
 
+def render_upsert_taxonomy_code(p: dict) -> CypherWrite:
+    """TaxonomyCode lands as a generic :TaxonomyCode label keyed by
+    (system, code). The sink also adds a per-system label via
+    SET n:<System> for label-specific queries (e.g. :CPV {code: ...})."""
+    label = "TaxonomyCode"
+    set_props = {
+        k: p[k] for k in (
+            "label", "label_lang", "level", "description",
+        ) if p.get(k) is not None
+    }
+    extras: list[tuple[str, str, dict]] = []
+    if parent := p.get("parent_code"):
+        # CHILD_OF edge to the parent code in the same system.
+        # The sink resolves the parent via system+parent_code.
+        sys_camel = p["system"].replace("-", "_").title().replace("_", "")
+        parent_iri = f"http://data.fontem.eu/id/{sys_camel}/{parent}"
+        extras.append((
+            "CHILD_OF", parent_iri, {"_direction": "from_source"},
+        ))
+    return CypherWrite(
+        label=label,
+        primary_key={"system": p["system"], "code": p["code"]},
+        set_props=set_props,
+        extra_relationships=extras or None,
+    )
+
+
+def render_upsert_relationship(p: dict) -> CypherWrite:
+    """A typed edge between two existing entity nodes. The sink
+    resolves both IRIs to (label, key) and MERGEs the relationship.
+
+    We model this as a virtual ``_Relationship`` write so the sink
+    layer (which knows how to parse fontem-id IRIs) can do the
+    MATCH/MERGE in one place instead of leaking that into every
+    renderer."""
+    set_props = {
+        k: p[k] for k in ("valid_from", "valid_to") if p.get(k) is not None
+    }
+    if extra := p.get("properties"):
+        set_props.update(extra)
+    return CypherWrite(
+        label="_Relationship",
+        primary_key={
+            "src_iri": p["src_iri"],
+            "dst_iri": p["dst_iri"],
+            "predicate": p["predicate"],
+        },
+        set_props=set_props,
+    )
+
+
+def render_upsert_disclosure(p: dict) -> CypherWrite:
+    """Disclosure as a generic :Disclosure label keyed by
+    (system, disclosure_id). Per-system label is added by the sink
+    (e.g. :Lobbyist for system='eu-lobbying').
+
+    The `details` bag is flattened: any scalar value lands as a
+    detail_<key> property. Lists and nested dicts are dropped — if
+    a producer needs them they need their own schema event."""
+    set_props = {
+        k: p[k] for k in (
+            "company_gmr_id", "disclosure_type", "filed_date",
+            "year", "title", "url",
+        ) if p.get(k) is not None
+    }
+    for k, v in (p.get("details") or {}).items():
+        if v is None or isinstance(v, (list, dict)):
+            continue
+        set_props[f"detail_{k}"] = v
+    extras = [(
+        "FILED_BY",
+        f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}",
+        {"_direction": "from_source"},
+    )]
+    return CypherWrite(
+        label="Disclosure",
+        primary_key={
+            "system": p["system"],
+            "disclosure_id": p["disclosure_id"],
+        },
+        set_props=set_props,
+        extra_relationships=extras,
+    )
+
+
+def render_upsert_exchange_rate(p: dict) -> CypherWrite:
+    """ExchangeRate keyed by (base, target, date). Three-part
+    composite primary key — the sink layer handles MERGE on it."""
+    set_props = {"rate": float(p["rate"])}
+    if src := p.get("source"):
+        set_props["source"] = src
+    return CypherWrite(
+        label="ExchangeRate",
+        primary_key={
+            "base": p["base"],
+            "target": p["target"],
+            "date": p["date"],
+        },
+        set_props=set_props,
+    )
+
+
 def render_assert_same_as(p: dict) -> CypherWrite:
     """Emitted as a SAME_AS edge between the two IRIs' Neo4j
     nodes. The sink resolves IRI → (label, key) by parsing the
@@ -197,6 +299,10 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
     "UpsertContract": render_upsert_contract,
+    "UpsertTaxonomyCode": render_upsert_taxonomy_code,
+    "UpsertRelationship": render_upsert_relationship,
+    "UpsertDisclosure": render_upsert_disclosure,
+    "UpsertExchangeRate": render_upsert_exchange_rate,
     "AssertSameAs": render_assert_same_as,
 }
 

@@ -2,8 +2,10 @@ from neo4j_sink.cypher import (
     RENDERERS, label_for_graph,
     render_assert_same_as, render_upsert_authority,
     render_upsert_company, render_upsert_contract,
+    render_upsert_disclosure, render_upsert_exchange_rate,
     render_upsert_filing, render_upsert_listing,
-    render_upsert_sanctioned_entity,
+    render_upsert_relationship, render_upsert_sanctioned_entity,
+    render_upsert_taxonomy_code,
 )
 
 
@@ -112,12 +114,82 @@ def test_contract_omits_relationships_when_keys_missing():
     assert w.extra_relationships in (None, [])
 
 
+def test_taxonomy_code_keyed_by_system_and_code():
+    w = render_upsert_taxonomy_code({
+        "system": "cpv", "code": "45000000",
+        "label": "Construction work", "label_lang": "en",
+    })
+    assert w.label == "TaxonomyCode"
+    assert w.primary_key == {"system": "cpv", "code": "45000000"}
+    assert w.set_props["label"] == "Construction work"
+    # No parent → no extra relationships.
+    assert not (w.extra_relationships or [])
+
+
+def test_taxonomy_code_parent_emits_child_of_edge():
+    w = render_upsert_taxonomy_code({
+        "system": "nuts", "code": "FR101", "parent_code": "FR1",
+    })
+    rels = w.extra_relationships or []
+    assert len(rels) == 1
+    rel_type, target_iri, props = rels[0]
+    assert rel_type == "CHILD_OF"
+    assert target_iri.endswith("/Nuts/FR1")
+    assert props["_direction"] == "from_source"
+
+
+def test_relationship_carries_iris_in_key():
+    w = render_upsert_relationship({
+        "src_iri": "http://data.fontem.eu/id/Company/A",
+        "dst_iri": "http://data.fontem.eu/id/Company/B",
+        "predicate": "parentOf",
+        "valid_from": "2020-01-01",
+    })
+    assert w.label == "_Relationship"
+    assert w.primary_key["predicate"] == "parentOf"
+    assert w.set_props["valid_from"] == "2020-01-01"
+
+
+def test_disclosure_filed_by_edge_to_company():
+    w = render_upsert_disclosure({
+        "system": "eu-lobbying",
+        "disclosure_id": "EU-TR-12345",
+        "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+        "year": 2024,
+        "details": {"total_eur_min": 200000, "fte_lobbyists": 4},
+    })
+    assert w.label == "Disclosure"
+    assert w.primary_key == {
+        "system": "eu-lobbying", "disclosure_id": "EU-TR-12345",
+    }
+    # detail_<key> projection.
+    assert w.set_props["detail_total_eur_min"] == 200000
+    assert w.set_props["detail_fte_lobbyists"] == 4
+    rels = w.extra_relationships or []
+    assert any(r[0] == "FILED_BY" for r in rels)
+
+
+def test_exchange_rate_composite_key():
+    w = render_upsert_exchange_rate({
+        "base": "EUR", "target": "USD",
+        "date": "2025-09-15", "rate": 1.0473, "source": "ecb",
+    })
+    assert w.label == "ExchangeRate"
+    assert w.primary_key == {
+        "base": "EUR", "target": "USD", "date": "2025-09-15",
+    }
+    assert w.set_props["rate"] == 1.0473
+    assert w.set_props["source"] == "ecb"
+
+
 def test_renderer_registry_covers_all_event_types():
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
         "UpsertCompany", "UpsertListing",
         "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
+        "UpsertTaxonomyCode", "UpsertRelationship",
+        "UpsertDisclosure", "UpsertExchangeRate",
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected
