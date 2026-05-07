@@ -224,7 +224,12 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
 
     The `details` bag is flattened: any scalar value lands as a
     detail_<key> property. Lists and nested dicts are dropped — if
-    a producer needs them they need their own schema event."""
+    a producer needs them they need their own schema event.
+
+    company_gmr_id is optional: when absent (EU lobbying register
+    where the registrant is the Lobbyist itself), the FILED_BY edge
+    is skipped and the registrant identity rides in details.
+    """
     set_props = {
         k: p[k] for k in (
             "company_gmr_id", "disclosure_type", "filed_date",
@@ -235,11 +240,13 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
         if v is None or isinstance(v, (list, dict)):
             continue
         set_props[f"detail_{k}"] = v
-    extras = [(
-        "FILED_BY",
-        f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}",
-        {"_direction": "from_source"},
-    )]
+    extras: list[tuple[str, str, dict]] = []
+    if cid := p.get("company_gmr_id"):
+        extras.append((
+            "FILED_BY",
+            f"http://data.fontem.eu/id/Company/{cid}",
+            {"_direction": "from_source"},
+        ))
     return CypherWrite(
         label="Disclosure",
         primary_key={
@@ -247,7 +254,7 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
             "disclosure_id": p["disclosure_id"],
         },
         set_props=set_props,
-        extra_relationships=extras,
+        extra_relationships=extras or None,
     )
 
 

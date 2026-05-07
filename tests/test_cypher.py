@@ -152,21 +152,33 @@ def test_relationship_carries_iris_in_key():
 
 def test_disclosure_filed_by_edge_to_company():
     w = render_upsert_disclosure({
-        "system": "eu-lobbying",
-        "disclosure_id": "EU-TR-12345",
+        "system": "cdp",
+        "disclosure_id": "CDP-12345",
         "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
         "year": 2024,
-        "details": {"total_eur_min": 200000, "fte_lobbyists": 4},
+        "details": {"score": "A", "scope1": 1000.0},
     })
     assert w.label == "Disclosure"
     assert w.primary_key == {
-        "system": "eu-lobbying", "disclosure_id": "EU-TR-12345",
+        "system": "cdp", "disclosure_id": "CDP-12345",
     }
-    # detail_<key> projection.
-    assert w.set_props["detail_total_eur_min"] == 200000
-    assert w.set_props["detail_fte_lobbyists"] == 4
+    assert w.set_props["detail_score"] == "A"
     rels = w.extra_relationships or []
     assert any(r[0] == "FILED_BY" for r in rels)
+
+
+def test_disclosure_omits_filed_by_when_no_company():
+    """EU lobbying register entries: registrant IS the Lobbyist,
+    no parent Company. The renderer must skip the FILED_BY edge so
+    the sink doesn't try to MATCH a non-existent Company node."""
+    w = render_upsert_disclosure({
+        "system": "eu-lobbying",
+        "disclosure_id": "EU-TR-12345",
+        "year": 2024,
+        "details": {"members_fte": 4},
+    })
+    assert w.label == "Disclosure"
+    assert w.extra_relationships in (None, [])
 
 
 def test_exchange_rate_composite_key():
