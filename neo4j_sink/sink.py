@@ -244,4 +244,10 @@ class Neo4jSink(EventConsumer):
             return "entity_id"
         if label == "Filing":
             return "filing_iri"
+        if label == "Listing":
+            return "ticker"
+        if label == "Authority":
+            return "authority_id"
+        if label == "Contract":
+            return "ted_notice_id"
         return "gmr_id"
