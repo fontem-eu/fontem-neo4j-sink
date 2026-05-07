@@ -93,6 +93,79 @@ def render_upsert_filing(p: dict) -> CypherWrite:
     )
 
 
+def render_upsert_listing(p: dict) -> CypherWrite:
+    """Listing keyed by ticker (mirrors the Neo4j-era schema). The
+    Company → Listing LISTED_AS edge is materialised by the sink
+    via extra_relationships; downstream price + financial fetchers
+    join via the Listing node, not through a property fan-out on
+    Company."""
+    set_props = {
+        k: p[k] for k in (
+            "exchange", "currency", "active", "isin", "mic",
+        ) if p.get(k) is not None
+    }
+    return CypherWrite(
+        label="Listing",
+        primary_key={"ticker": p["ticker"]},
+        set_props=set_props,
+        extra_relationships=[
+            (
+                "LISTED_AS",
+                f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}",
+                {"_direction": "from_target"},
+            ),
+        ],
+    )
+
+
+def render_upsert_authority(p: dict) -> CypherWrite:
+    set_props = {
+        k: p[k] for k in (
+            "name", "country", "authority_type", "national_id",
+            "url", "postal_code", "city", "nuts",
+        ) if p.get(k) is not None
+    }
+    return CypherWrite(
+        label="Authority",
+        primary_key={"authority_id": p["authority_id"]},
+        set_props=set_props,
+    )
+
+
+def render_upsert_contract(p: dict) -> CypherWrite:
+    """Contract keyed by ted_notice_id. Two extra_relationships:
+    Authority-[:AWARDED]->Contract (from_target), and
+    Contract-[:AWARDED_TO]->Company (from_source). Either side
+    may be missing; the relationship is only emitted when its key
+    is populated."""
+    set_props = {
+        k: p[k] for k in (
+            "title", "publication_date", "value_eur",
+            "value_currency", "value_original",
+            "cpv", "nuts", "language",
+        ) if p.get(k) is not None
+    }
+    extras: list[tuple[str, str, dict]] = []
+    if aid := p.get("authority_id"):
+        extras.append((
+            "AWARDED",
+            f"http://data.fontem.eu/id/Authority/{aid}",
+            {"_direction": "from_target"},
+        ))
+    if cid := p.get("company_gmr_id"):
+        extras.append((
+            "AWARDED_TO",
+            f"http://data.fontem.eu/id/Company/{cid}",
+            {"_direction": "from_source"},
+        ))
+    return CypherWrite(
+        label="Contract",
+        primary_key={"ted_notice_id": p["ted_notice_id"]},
+        set_props=set_props,
+        extra_relationships=extras or None,
+    )
+
+
 def render_assert_same_as(p: dict) -> CypherWrite:
     """Emitted as a SAME_AS edge between the two IRIs' Neo4j
     nodes. The sink resolves IRI → (label, key) by parsing the
@@ -119,8 +192,11 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
     "UpsertCompany": render_upsert_company,
+    "UpsertListing": render_upsert_listing,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
+    "UpsertAuthority": render_upsert_authority,
+    "UpsertContract": render_upsert_contract,
     "AssertSameAs": render_assert_same_as,
 }
 
