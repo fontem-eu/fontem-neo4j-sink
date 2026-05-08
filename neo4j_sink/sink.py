@@ -105,6 +105,21 @@ class Neo4jSink(EventConsumer):
             return next(iter(writes))
         return None
 
+    @staticmethod
+    def _name_clean_fragment(label: str, has_name: bool) -> str:
+        """For Company/Authority writes that include `name`, also
+        materialise `name_clean = apoc.text.clean(name)`. This is
+        the property the consolidator's resolver + dedup rules now
+        look up via a range index — without this fragment they'd
+        keep doing the function-on-property full scan that pinned
+        each consolidate() to ~10s.
+
+        Returns a Cypher SET fragment to append, or "" if N/A.
+        """
+        if label not in ("Company", "Authority") or not has_name:
+            return ""
+        return ", n.name_clean = apoc.text.clean(row.name)"
+
     def _flush_bracket(
         self, label: str, writes: list[CypherWrite],
     ) -> None:
@@ -137,6 +152,9 @@ class Neo4jSink(EventConsumer):
             f"n.{k} = row.{k}"
             for k in writes[0].set_props.keys()
         ) or "n.gmr_id = n.gmr_id"  # no-op if no extra fields
+        set_clause += self._name_clean_fragment(
+            label, "name" in writes[0].set_props,
+        )
 
         cypher = (
             f"UNWIND $rows AS row "
@@ -174,6 +192,17 @@ class Neo4jSink(EventConsumer):
         set_clause = ", ".join(
             f"n.{k} = ${k}_val" for k in w.set_props.keys()
         )
+        # Append the name_clean materialisation when applicable.
+        # The fragment uses $name_val (already in params from the
+        # set_props loop above) so no extra parameter wiring needed.
+        clean_frag = self._name_clean_fragment(
+            w.label, "name" in w.set_props,
+        )
+        if clean_frag:
+            # Per-event MERGE uses $param_val style, not row.X — fix
+            # the fragment for that case.
+            clean_frag = clean_frag.replace("row.name", "$name_val")
+            set_clause = (set_clause + clean_frag) if set_clause else clean_frag.lstrip(", ")
         params = {**w.primary_key,
                   **{f"{k}_val": v for k, v in w.set_props.items()}}
         cypher = (

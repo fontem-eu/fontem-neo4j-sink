@@ -205,3 +205,36 @@ def test_renderer_registry_covers_all_event_types():
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected
+
+
+# ── name_clean materialisation (sink-side) ──────────────────────
+
+def test_name_clean_fragment_company_with_name():
+    """Company writes with `name` set must materialise name_clean
+    so the consolidator's resolver can use the indexed column."""
+    from neo4j_sink.sink import Neo4jSink
+    frag = Neo4jSink._name_clean_fragment("Company", has_name=True)
+    assert "n.name_clean" in frag
+    assert "apoc.text.clean(row.name)" in frag
+
+
+def test_name_clean_fragment_authority_with_name():
+    from neo4j_sink.sink import Neo4jSink
+    frag = Neo4jSink._name_clean_fragment("Authority", has_name=True)
+    assert "n.name_clean" in frag
+
+
+def test_name_clean_fragment_skipped_for_other_labels():
+    """Listing/Contract/SanctionedEntity don't get name_clean — the
+    resolver only matches Company + Authority by it."""
+    from neo4j_sink.sink import Neo4jSink
+    for label in ("Listing", "Contract", "SanctionedEntity", "FinancialYear"):
+        assert Neo4jSink._name_clean_fragment(label, has_name=True) == ""
+
+
+def test_name_clean_fragment_skipped_when_name_missing():
+    """A consolidator partial-update event that doesn't include `name`
+    must not blank out an existing name_clean by computing
+    apoc.text.clean(NULL)."""
+    from neo4j_sink.sink import Neo4jSink
+    assert Neo4jSink._name_clean_fragment("Company", has_name=False) == ""
