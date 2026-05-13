@@ -13,12 +13,12 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY neo4j_sink/ ./neo4j_sink/
 
-COPY vendor/gmr-events/      /tmp/gmr-events/
-COPY vendor/gmr-event-schemas/ /tmp/gmr-event-schemas/
-RUN pip install --no-cache-dir /tmp/gmr-event-schemas \
-                                /tmp/gmr-events \
+COPY vendor/fontem-events/      /tmp/fontem-events/
+COPY vendor/fontem-event-schemas/ /tmp/fontem-event-schemas/
+RUN pip install --no-cache-dir /tmp/fontem-event-schemas \
+                                /tmp/fontem-events \
                                 . \
- && rm -rf /tmp/gmr-events /tmp/gmr-event-schemas
+ && rm -rf /tmp/fontem-events /tmp/fontem-event-schemas
 
 RUN useradd --create-home --shell /bin/bash sink
 USER sink

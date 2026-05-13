@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fontem-neo4j-sink"
 version = "0.1.0"
-description = "Neo4j projection sink for the gmr_app event log."
+description = "Neo4j projection sink for the fontem event log."
 requires-python = ">=3.11"
 dependencies = [
-    "gmr-events",
-    "gmr-event-schemas",
+    "fontem-events",
+    "fontem-event-schemas",
     "neo4j>=5.20",
     "psycopg[binary]>=3.1",
     "prometheus-client>=0.21",

@@ -1,0 +1,116 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        env:
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+        run: |
+          # Internal deps that aren't on the proxy index — clone + install.
+          tmpdir=$(mktemp -d)
+          for repo in fontem-event-schemas fontem-events; do
+              git clone --depth 1 \
+                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
+                  "$tmpdir/$repo"
+              pip install --no-cache-dir "$tmpdir/$repo"
+          done
+          pip install --no-cache-dir -e '.[test]'
+      - name: pytest
+        run: pytest -v
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: void42/fontem-ci
+          path: .fontem-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+      - name: OSV-Scanner lockfile gate
+        uses: ./.fontem-ci/actions/osv-scan
+      - name: Secret scan (gitleaks)
+        uses: ./.fontem-ci/actions/secret-scan
+
+  build-deploy:
+    needs: [test, security]
+    if: github.ref == 'refs/heads/main'
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: void42/fontem-ci
+          path: .fontem-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+
+      - id: sbom
+        name: Generate + upload SBOM
+        uses: ./.fontem-ci/actions/sbom-generate
+        with:
+          language: python
+          project-name: fontem-neo4j-sink
+          project-version: ${{ github.sha }}
+          dtrack-key: ${{ secrets.DTRACK_API_KEY }}
+
+      - name: Vendor internal Python deps for docker build
+        # Dockerfile pip-installs from vendor/fontem-event-schemas and
+        # vendor/fontem-events. pip's isolated-build env can't reach the
+        # internal Gitea, so we clone here at CI time and let docker copy in.
+        env:
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+        run: |
+          mkdir -p vendor
+          for repo in fontem-event-schemas fontem-events; do
+              rm -rf "vendor/$repo"
+              git clone --depth 1 \
+                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
+                  "vendor/$repo"
+              rm -rf "vendor/$repo/.git"
+          done
+
+      - id: image
+        name: Build, push, sign, attest
+        uses: ./.fontem-ci/actions/docker-build-sign
+        with:
+          image: contribute.void42.internal/fontem/fontem-neo4j-sink
+          cosign-key: ${{ secrets.COSIGN_KEY }}
+          registry-user: ${{ secrets.REGISTRY_USER }}
+          registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+          sbom-path: ${{ steps.sbom.outputs.sbom-path }}
+
+      # Sinks aren't deployed via a Helm chart — their Deployment lives
+      # inline in gitops/infra/{staging,prod}.yaml as a literal image
+      # tag. We can't reuse the gitops-bump action (which expects
+      # <env>/<service>.yaml with a `version:` field). Bump the literal
+      # `image:` line directly in infra/staging.yaml for the testing+staging
+      # envs that consume the same manifest.
+      - name: Bump image tag in gitops infra
+        env:
+          GITOPS_TOKEN: ${{ secrets.REGISTRY_PASSWORD }}
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/gitops
+          git clone --depth=1 \
+            "https://oauth2:${GITOPS_TOKEN}@contribute.void42.internal/fontem/gitops.git" \
+            /tmp/gitops
+          cd /tmp/gitops
+          # Only auto-bump non-prod (testing/staging share infra/staging.yaml).
+          # Prod stays manual; the user bumps infra/prod.yaml when ready.
+          sed -i -E "s|(image: contribute\.void42\.internal/fontem/fontem-neo4j-sink:)[^\"[:space:]]+|\1${TAG}|" \
+            infra/staging.yaml || true
+          git config user.name "Fontem CI"
+          git config user.email "ci@void42.internal"
+          git add infra/staging.yaml
+          git diff --cached --quiet && { echo "No-op bump (already at $TAG)"; exit 0; }
+          git commit -m "ci: deploy fontem-neo4j-sink ${TAG} to testing+staging [skip ci]"
+          git push origin main

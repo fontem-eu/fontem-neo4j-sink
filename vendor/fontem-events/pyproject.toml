@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gmr-events"
+name = "fontem-events"
 version = "0.1.0"
-description = "Runtime client lib for the gmr_app event log."
+description = "Runtime client lib for the fontem event log."
 requires-python = ">=3.11"
 authors = [{ name = "Fontem", email = "ops@void42.internal" }]
 license = { text = "Internal-only" }
