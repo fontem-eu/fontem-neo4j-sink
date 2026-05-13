@@ -69,6 +69,6 @@ VirtuosoSink.from_env().run_forever()
 
 * **Producers**: every ETL loader in `edgar-gmr-etl`, the
   consolidator in `gmr-consolidator`.
-* **Consumers**: `gmr-virtuoso-sink`, `gmr-neo4j-sink`, and
+* **Consumers**: `gmr-virtuoso-sink`, `fontem-neo4j-sink`, and
   `gmr-consolidator` (which reads from the log to drive
   detection rules — gated by the Neo4j sink's offset).

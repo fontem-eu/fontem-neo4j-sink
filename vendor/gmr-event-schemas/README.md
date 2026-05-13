@@ -57,4 +57,4 @@ versions.
 - `gmr-events` — the Python lib that producers and consumers
   use to emit/consume events.
 - `edgar-gmr-etl`, `gmr-consolidator` — producers.
-- `gmr-virtuoso-sink`, `gmr-neo4j-sink` — consumers.
+- `gmr-virtuoso-sink`, `fontem-neo4j-sink` — consumers.
