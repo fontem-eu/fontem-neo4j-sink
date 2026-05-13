@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/entities/UpsertDisclosure.json",
+  "title": "UpsertDisclosure",
+  "description": "A non-financial disclosure — EU lobbying register entry, CDP environmental disclosure, etc. Each disclosure is keyed by (system, disclosure_id) and linked to its filer (a Company by gmr_id). Free-form `details` carry the system-specific payload so the schema doesn't have to enumerate every disclosure regime; downstream queries land on `disclosure_type` + `details.*` for filtering.",
+  "type": "object",
+  "required": ["system", "disclosure_id"],
+  "properties": {
+    "system":          { "type": "string", "minLength": 1, "description": "Disclosure source — 'eu-lobbying', 'cdp', etc." },
+    "disclosure_id":   { "type": "string", "minLength": 1, "description": "Stable ID within the source system." },
+    "company_gmr_id":  { "type": ["string", "null"], "format": "uuid", "description": "gmr_id of the filer when known. Optional because some disclosure regimes (EU lobbying register) file under entities that aren't Companies — those events carry the registrant's identity in the system-specific details map instead." },
+    "disclosure_type": { "type": ["string", "null"], "description": "Free-form sub-type within the system, e.g. 'climate-change' for CDP." },
+    "filed_date":      { "type": ["string", "null"], "format": "date" },
+    "year":            { "type": ["integer", "null"], "minimum": 1900, "maximum": 2100 },
+    "title":           { "type": ["string", "null"] },
+    "url":             { "type": ["string", "null"], "format": "uri" },
+    "details":         { "type": "object", "additionalProperties": true, "description": "System-specific extra fields." }
+  },
+  "additionalProperties": false
+}

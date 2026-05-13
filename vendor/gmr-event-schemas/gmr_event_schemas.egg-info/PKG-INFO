@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: gmr-event-schemas
-Version: 0.1.0
-Summary: JSON Schemas for the gmr_app events.entity_events log.
-Author-email: Fontem <ops@void42.internal>
-License: Internal-only
-Requires-Python: >=3.11
-Requires-Dist: jsonschema>=4.21

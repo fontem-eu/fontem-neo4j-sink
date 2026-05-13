@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/entities/UpsertExchangeRate.json",
+  "title": "UpsertExchangeRate",
+  "description": "Daily FX rate (target_currency per 1 base_currency) for a given date. Identified by (base, target, date). Sinks materialise these as time-series rows; downstream EUR-conversion services query by (currency, date) range.",
+  "type": "object",
+  "required": ["base", "target", "date", "rate"],
+  "properties": {
+    "base":   { "type": "string", "minLength": 3, "maxLength": 3, "description": "ISO 4217 base currency (rate is target per 1 base)." },
+    "target": { "type": "string", "minLength": 3, "maxLength": 3 },
+    "date":   { "type": "string", "format": "date" },
+    "rate":   { "type": "number", "exclusiveMinimum": 0 },
+    "source": { "type": ["string", "null"], "description": "Provider — 'ecb', 'frankfurter', etc." }
+  },
+  "additionalProperties": false
+}

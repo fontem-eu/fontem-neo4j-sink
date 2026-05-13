@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/entities/UpsertListing.json",
+  "title": "UpsertListing",
+  "description": "A stock/security listing. Tickers are how price + volume + financial data is fetched downstream (LocalEdgarFetcher, OpenFIGI, exchange data feeds), so listings are first-class — a Company can have N listings and downstream loaders join by ticker. The listing is linked to its parent Company by company_gmr_id; sinks materialise the LISTED_AS edge from that.",
+  "type": "object",
+  "required": ["ticker", "company_gmr_id"],
+  "properties": {
+    "ticker":         { "type": "string",  "minLength": 1, "description": "Exchange-local ticker symbol, uppercased." },
+    "company_gmr_id": { "type": "string",  "format": "uuid", "description": "gmr_id of the parent Company." },
+    "exchange":       { "type": ["string", "null"], "description": "Exchange code (e.g. 'US', 'NASDAQ', 'LSE', 'EURONEXT-PARIS'). 'US' is shorthand for the EDGAR universe; FIRDS-derived listings carry MIC codes." },
+    "currency":       { "type": ["string", "null"], "description": "Trading currency (ISO 4217)." },
+    "active":         { "type": ["boolean", "null"] },
+    "isin":           { "type": ["string", "null"], "minLength": 12, "maxLength": 12 },
+    "mic":            { "type": ["string", "null"], "minLength": 4, "maxLength": 4, "description": "Market Identifier Code (ISO 10383)." }
+  },
+  "additionalProperties": false
+}

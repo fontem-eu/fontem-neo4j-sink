@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/entities/UpsertContract.json",
+  "title": "UpsertContract",
+  "description": "A public procurement contract — primarily TED (EU Tenders Electronic Daily) award notices. Linked to its contracting Authority via authority_id and to the awarded Company (vendor) via company_gmr_id. Sinks materialise AWARDED (Authority→Contract) and AWARDED_TO (Contract→Company) edges from those keys.",
+  "type": "object",
+  "required": ["ted_notice_id"],
+  "properties": {
+    "ted_notice_id":   { "type": "string", "minLength": 1, "description": "TED notice ID (or other procurement source notice ID)." },
+    "title":           { "type": ["string", "null"] },
+    "authority_id":    { "type": ["string", "null"], "format": "uuid", "description": "Contracting authority's authority_id." },
+    "company_gmr_id":  { "type": ["string", "null"], "format": "uuid", "description": "Awarded company's gmr_id." },
+    "publication_date":{ "type": ["string", "null"], "format": "date" },
+    "value_eur":       { "type": ["number", "null"], "description": "Contract value in EUR (converted at publication date)." },
+    "value_currency":  { "type": ["string", "null"], "description": "Original ISO 4217 currency before EUR conversion." },
+    "value_original":  { "type": ["number", "null"], "description": "Contract value in the original currency." },
+    "cpv":             { "type": ["string", "null"], "description": "Primary CPV code." },
+    "nuts":            { "type": ["string", "null"], "description": "Place-of-performance NUTS code." },
+    "language":        { "type": ["string", "null"], "description": "Notice language code." }
+  },
+  "additionalProperties": false
+}

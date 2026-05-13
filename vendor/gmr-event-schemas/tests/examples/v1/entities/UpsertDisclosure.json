@@ -1,0 +1,15 @@
+{
+  "system": "eu-lobbying",
+  "disclosure_id": "EU-TR-12345",
+  "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+  "disclosure_type": "annual-declaration",
+  "filed_date": "2025-03-15",
+  "year": 2024,
+  "title": "Annual lobbying declaration",
+  "url": "https://transparency-register.europa.eu/...",
+  "details": {
+    "total_eur_min": 200000,
+    "total_eur_max": 299999,
+    "fte_lobbyists": 4
+  }
+}

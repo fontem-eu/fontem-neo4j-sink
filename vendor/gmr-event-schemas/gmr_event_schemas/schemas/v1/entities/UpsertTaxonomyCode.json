@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.fontem.eu/v1/entities/UpsertTaxonomyCode.json",
+  "title": "UpsertTaxonomyCode",
+  "description": "A code in a structured taxonomy or reference list — CPV (procurement), NUTS (geo), FIRDS (instruments), MIC (markets), exchange identifiers, etc. Identified by (system, code) so different schemes can coexist without collision; a flat key would force unnatural namespacing on the producers. Sinks materialise per-system labels and parent_code → CHILD_OF edges if the taxonomy is hierarchical.",
+  "type": "object",
+  "required": ["system", "code"],
+  "properties": {
+    "system":      { "type": "string", "minLength": 1, "description": "Taxonomy ID, e.g. 'cpv', 'nuts', 'firds-instrument', 'mic', 'iso-4217'." },
+    "code":        { "type": "string", "minLength": 1, "description": "Code value within the taxonomy." },
+    "label":       { "type": ["string", "null"] },
+    "label_lang":  { "type": ["string", "null"], "description": "BCP-47 / ISO-639 language tag for `label` when set." },
+    "parent_code": { "type": ["string", "null"], "description": "Parent code in the same `system` (hierarchical taxonomies only)." },
+    "level":       { "type": ["integer", "null"], "minimum": 0, "description": "Depth in the hierarchy (0 = root)." },
+    "description": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

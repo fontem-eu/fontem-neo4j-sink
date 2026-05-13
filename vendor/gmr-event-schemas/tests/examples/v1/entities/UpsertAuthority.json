@@ -1,0 +1,10 @@
+{
+  "authority_id": "11111111-2222-5333-8444-555555555555",
+  "name": "Conseil constitutionnel",
+  "country": "FR",
+  "authority_type": "regulator",
+  "national_id": "FR-CC-001",
+  "url": "https://www.conseil-constitutionnel.fr",
+  "city": "Paris",
+  "nuts": "FR101"
+}

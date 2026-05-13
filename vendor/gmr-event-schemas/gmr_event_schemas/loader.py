@@ -44,8 +44,15 @@ _EVENT_TYPE_CATEGORY: dict[str, str] = {
     "EndGraphReplace":   "control",
     # entities
     "UpsertCompany":          "entities",
+    "UpsertListing":          "entities",
     "UpsertSanctionedEntity": "entities",
     "UpsertFiling":           "entities",
+    "UpsertAuthority":        "entities",
+    "UpsertContract":         "entities",
+    "UpsertTaxonomyCode":     "entities",
+    "UpsertRelationship":     "entities",
+    "UpsertDisclosure":       "entities",
+    "UpsertExchangeRate":     "entities",
     # consolidation
     "AssertSameAs": "consolidation",
 }

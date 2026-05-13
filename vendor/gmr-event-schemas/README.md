@@ -5,7 +5,7 @@ log in `gmr_app`. Versioned per event type; published as a
 Python package (`gmr_event_schemas`) imported by every producer
 and every consumer.
 
-See [fontem-ontology/MIGRATION.md](https://contribute.void42.internal/golden/fontem-ontology/src/branch/main/MIGRATION.md) for the broader event-log architecture.
+See [fontem-ontology/MIGRATION.md](https://contribute.void42.internal/fontem/fontem-ontology/src/branch/main/MIGRATION.md) for the broader event-log architecture.
 
 ## Layout
 
