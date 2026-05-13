@@ -10,8 +10,8 @@ See [fontem-ontology/MIGRATION.md](https://contribute.void42.internal/fontem/fon
 ## What you get
 
 ```python
-from gmr_events import EventLog, EventConsumer
-from gmr_event_schemas import builders
+from fontem_events import EventLog, EventConsumer
+from fontem_event_schemas import builders
 
 # ── producer side: in an ETL loader ────────────────────────
 log = EventLog.from_env()                          # reads DATABASE_URL

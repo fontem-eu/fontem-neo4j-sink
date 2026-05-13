@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from gmr_event_schemas import (
+from fontem_event_schemas import (
     EventValidationError,
     available_event_types,
     validate,
 )
-from gmr_event_schemas.loader import _EVENT_TYPE_CATEGORY
+from fontem_event_schemas.loader import _EVENT_TYPE_CATEGORY
 
 _EXAMPLES = Path(__file__).parent / "examples" / "v1"
 

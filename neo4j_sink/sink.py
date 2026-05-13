@@ -18,8 +18,8 @@ import os
 from collections import defaultdict
 from typing import Iterable
 
-from gmr_event_schemas import EventEnvelope
-from gmr_events import EventConsumer
+from fontem_event_schemas import EventEnvelope
+from fontem_events import EventConsumer
 from neo4j import GraphDatabase
 
 from .cypher import RENDERERS, CypherWrite, label_for_graph

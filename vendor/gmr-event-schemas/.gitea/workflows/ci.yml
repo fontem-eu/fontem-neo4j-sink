@@ -25,7 +25,7 @@ jobs:
         run: |
           python -c "
           import json, pathlib
-          from gmr_event_schemas.loader import _EVENT_TYPE_CATEGORY
+          from fontem_event_schemas.loader import _EVENT_TYPE_CATEGORY
           shipped = {p.stem for p in pathlib.Path('v1').rglob('*.json')}
           registered = set(_EVENT_TYPE_CATEGORY)
           missing = shipped - registered

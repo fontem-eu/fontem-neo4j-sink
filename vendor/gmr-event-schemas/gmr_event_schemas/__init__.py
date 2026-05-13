@@ -1,4 +1,4 @@
-"""gmr_event_schemas — JSON Schemas + helpers for the gmr_app event log.
+"""fontem_event_schemas — JSON Schemas + helpers for the gmr_app event log.
 
 Every event written to ``events.entity_events`` (in gmr_app) has a
 typed schema that lives under ``v<N>/<category>/<EventType>.json``.
@@ -13,7 +13,7 @@ This package exposes the schemas at import time and gives producers
     every producer from re-deriving the field set.
 
 The full event envelope (the row written to entity_events) is the
-``EventEnvelope`` dataclass in ``events`` — see ``gmr_events`` for
+``EventEnvelope`` dataclass in ``events`` — see ``fontem_events`` for
 the runtime that actually inserts rows.
 """
 from .events import EventEnvelope

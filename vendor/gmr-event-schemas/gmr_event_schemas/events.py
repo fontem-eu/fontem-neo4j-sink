@@ -1,6 +1,6 @@
 """Envelope dataclass — the row that lands in events.entity_events.
 
-The actual insert is in ``gmr_events`` (separate package) so this
+The actual insert is in ``fontem_events`` (separate package) so this
 file stays dependency-light. Producers use this to build envelopes;
 consumers receive them.
 """

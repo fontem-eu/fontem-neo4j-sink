@@ -2,7 +2,7 @@
 
 JSON Schemas for events written to the `events.entity_events`
 log in `gmr_app`. Versioned per event type; published as a
-Python package (`gmr_event_schemas`) imported by every producer
+Python package (`fontem_event_schemas`) imported by every producer
 and every consumer.
 
 See [fontem-ontology/MIGRATION.md](https://contribute.void42.internal/fontem/fontem-ontology/src/branch/main/MIGRATION.md) for the broader event-log architecture.
@@ -24,7 +24,7 @@ v1/                                # schema-version 1
     AssertSameAs.json
     MergeRequested.json
     EntityFlagged.json
-gmr_event_schemas/                 # the Python package
+fontem_event_schemas/                 # the Python package
   __init__.py
   loader.py                        # find/parse schemas at import time
   validate.py                      # `validate(event_type, version, payload)`
@@ -49,7 +49,7 @@ versions.
 1. Drop a JSON Schema at `v<N>/<category>/<EventType>.json`.
 2. Drop a known-good example at `tests/examples/v<N>/<EventType>.json`.
 3. CI runs `pytest` which validates every example against its schema.
-4. Add a typed builder helper in `gmr_event_schemas/builders.py`
+4. Add a typed builder helper in `fontem_event_schemas/builders.py`
    if you want type-checked emission from producer code.
 
 ## Consumed by

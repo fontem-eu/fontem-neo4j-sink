@@ -14,10 +14,10 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["gmr_event_schemas*"]
+include = ["fontem_event_schemas*"]
 
 [tool.setuptools.package-data]
-gmr_event_schemas = ["schemas/v*/*/*.json"]
+fontem_event_schemas = ["schemas/v*/*/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -67,7 +67,7 @@ def load_schema(event_type: str, version: int = 1) -> dict:
     if category is None:
         raise FileNotFoundError(
             f"unknown event_type: {event_type!r} "
-            "(register it in gmr_event_schemas.loader._EVENT_TYPE_CATEGORY)"
+            "(register it in fontem_event_schemas.loader._EVENT_TYPE_CATEGORY)"
         )
     return _read_cached(version, category, event_type)
 
