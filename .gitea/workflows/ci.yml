@@ -61,22 +61,6 @@ jobs:
           project-version: ${{ github.sha }}
           dtrack-key: ${{ secrets.DTRACK_API_KEY }}
 
-      - name: Vendor internal Python deps for docker build
-        # Dockerfile pip-installs from vendor/fontem-event-schemas and
-        # vendor/fontem-events. pip's isolated-build env can't reach the
-        # internal Gitea, so we clone here at CI time and let docker copy in.
-        env:
-          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
-        run: |
-          mkdir -p vendor
-          for repo in fontem-event-schemas fontem-events; do
-              rm -rf "vendor/$repo"
-              git clone --depth 1 \
-                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
-                  "vendor/$repo"
-              rm -rf "vendor/$repo/.git"
-          done
-
       - id: image
         name: Build, push, sign, attest
         uses: ./.fontem-ci/actions/docker-build-sign
@@ -95,13 +79,15 @@ jobs:
       # envs that consume the same manifest.
       - name: Bump image tag in gitops infra
         env:
-          GITOPS_TOKEN: ${{ secrets.REGISTRY_PASSWORD }}
           TAG: ${{ steps.image.outputs.tag }}
         run: |
           set -euo pipefail
           rm -rf /tmp/gitops
+          # Explicit ${USER}:${TOKEN}@ form; OAuth2 scheme rejects
+          # the registry deploy token even when the same combo is
+          # accepted for `docker login` to gitea-registry.
           git clone --depth=1 \
-            "https://oauth2:${GITOPS_TOKEN}@contribute.void42.internal/fontem/gitops.git" \
+            "https://${{ secrets.REGISTRY_USER }}:${{ secrets.REGISTRY_PASSWORD }}@contribute.void42.internal/fontem/gitops.git" \
             /tmp/gitops
           cd /tmp/gitops
           # Only auto-bump non-prod (testing/staging share infra/staging.yaml).
