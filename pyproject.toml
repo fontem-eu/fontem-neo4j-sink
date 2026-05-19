@@ -7,9 +7,13 @@ name = "fontem-neo4j-sink"
 version = "0.1.0"
 description = "Neo4j projection sink for the fontem event log."
 requires-python = ">=3.11"
+# fontem-events and fontem-event-schemas are pinned to the exact
+# version of the wheel we vendor under `vendor/*.whl`. Bumping the
+# pin without dropping a matching wheel into vendor/ (or vice-versa)
+# fails the Docker build — see `vendor/CHECK_VERSIONS.md`.
 dependencies = [
-    "fontem-events",
-    "fontem-event-schemas",
+    "fontem-events==0.2.0",
+    "fontem-event-schemas==0.1.0",
     "neo4j>=5.20",
     "psycopg[binary]>=3.1",
     "prometheus-client>=0.21",

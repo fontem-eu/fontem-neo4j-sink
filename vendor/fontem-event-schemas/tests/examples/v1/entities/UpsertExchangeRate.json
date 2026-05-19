@@ -1,7 +1,0 @@
-{
-  "base": "EUR",
-  "target": "USD",
-  "date": "2025-09-15",
-  "rate": 1.0473,
-  "source": "ecb"
-}

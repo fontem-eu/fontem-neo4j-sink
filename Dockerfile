@@ -13,12 +13,15 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY neo4j_sink/ ./neo4j_sink/
 
-COPY vendor/fontem-events/      /tmp/fontem-events/
-COPY vendor/fontem-event-schemas/ /tmp/fontem-event-schemas/
-RUN pip install --no-cache-dir /tmp/fontem-event-schemas \
-                                /tmp/fontem-events \
-                                . \
- && rm -rf /tmp/fontem-events /tmp/fontem-event-schemas
+# Vendored wheels — pinned by filename. To bump fontem-events or
+# fontem-event-schemas: build a new wheel in the producing repo,
+# drop it into vendor/, delete the old one, and update the version
+# pins in pyproject.toml. The pin + the wheel filename must agree;
+# pip refuses to satisfy the pin from a wheel with a different
+# version, so a mismatch fails the build.
+COPY vendor/*.whl /tmp/wheels/
+RUN pip install --no-cache-dir /tmp/wheels/*.whl . \
+ && rm -rf /tmp/wheels
 
 RUN useradd --create-home --shell /bin/bash sink
 USER sink

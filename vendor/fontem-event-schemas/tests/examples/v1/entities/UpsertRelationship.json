@@ -1,6 +1,0 @@
-{
-  "src_iri": "http://data.fontem.eu/id/Company/00000000-0000-5000-8000-000000000001",
-  "dst_iri": "http://data.fontem.eu/id/Company/00000000-0000-5000-8000-000000000002",
-  "predicate": "parentOf",
-  "valid_from": "2020-01-01"
-}
