@@ -1,3 +1,9 @@
+# pylint: disable=protected-access
+# The name_clean materialisation tests below pin down the behavior of
+# Neo4jSink._name_clean_fragment, which is the kind of "do not regress"
+# private-helper coverage that lives next to the symbol. The
+# underscore prefix on the helper marks it sink-internal vs API;
+# pylint's blanket no-touch policy is the wrong default here.
 from neo4j_sink.cypher import (
     RENDERERS, label_for_graph,
     render_assert_same_as, render_upsert_authority,
@@ -7,6 +13,7 @@ from neo4j_sink.cypher import (
     render_upsert_relationship, render_upsert_sanctioned_entity,
     render_upsert_taxonomy_code,
 )
+from neo4j_sink.sink import Neo4jSink
 
 
 def test_company_round_trip():
@@ -212,14 +219,12 @@ def test_renderer_registry_covers_all_event_types():
 def test_name_clean_fragment_company_with_name():
     """Company writes with `name` set must materialise name_clean
     so the consolidator's resolver can use the indexed column."""
-    from neo4j_sink.sink import Neo4jSink
     frag = Neo4jSink._name_clean_fragment("Company", has_name=True)
     assert "n.name_clean" in frag
     assert "apoc.text.clean(row.name)" in frag
 
 
 def test_name_clean_fragment_authority_with_name():
-    from neo4j_sink.sink import Neo4jSink
     frag = Neo4jSink._name_clean_fragment("Authority", has_name=True)
     assert "n.name_clean" in frag
 
@@ -227,7 +232,6 @@ def test_name_clean_fragment_authority_with_name():
 def test_name_clean_fragment_skipped_for_other_labels():
     """Listing/Contract/SanctionedEntity don't get name_clean — the
     resolver only matches Company + Authority by it."""
-    from neo4j_sink.sink import Neo4jSink
     for label in ("Listing", "Contract", "SanctionedEntity", "FinancialYear"):
         assert Neo4jSink._name_clean_fragment(label, has_name=True) == ""
 
@@ -236,5 +240,4 @@ def test_name_clean_fragment_skipped_when_name_missing():
     """A consolidator partial-update event that doesn't include `name`
     must not blank out an existing name_clean by computing
     apoc.text.clean(NULL)."""
-    from neo4j_sink.sink import Neo4jSink
     assert Neo4jSink._name_clean_fragment("Company", has_name=False) == ""

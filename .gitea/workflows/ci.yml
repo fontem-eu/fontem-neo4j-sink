@@ -23,8 +23,11 @@ jobs:
               pip install --no-cache-dir "$tmpdir/$repo"
           done
           pip install --no-cache-dir -e '.[test]'
+          pip install --no-cache-dir pylint
       - name: pytest
         run: pytest -v
+      - name: Lint
+        run: pylint neo4j_sink tests
 
   security:
     runs-on: ubuntu-latest

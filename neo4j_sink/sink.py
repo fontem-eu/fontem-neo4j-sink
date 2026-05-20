@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from typing import Iterable
 
 from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
@@ -271,10 +270,15 @@ class Neo4jSink(EventConsumer):
         cleaned = "".join(c if c.isalnum() else "_" for c in "".join(out))
         return cleaned.upper().strip("_") or "RELATED_TO"
 
-    def _apply_relationship(
+    def _apply_relationship(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, src_label: str, src_key: dict,
         rel_type: str, target_iri: str, props: dict,
     ) -> None:
+        # All five params carry distinct, non-mergeable meaning:
+        # src_label + src_key locate the source node, rel_type names
+        # the edge, target_iri identifies the destination, props are
+        # edge attributes. A dataclass wrapper just renames the
+        # indirection at every call site.
         tgt_label, tgt_key = self._iri_to_label_key(target_iri)
         direction = props.pop("_direction", "from_source")
         src_match = ", ".join(f"{k}: ${k}" for k in src_key.keys())
@@ -303,22 +307,20 @@ class Neo4jSink(EventConsumer):
         label, _, key = suffix.partition("/")
         return label, key
 
-    @staticmethod
-    def _key_field(label: str) -> str:
-        if label == "SanctionedEntity":
-            return "entity_id"
-        if label == "Sanction":
-            return "entity_id"
-        if label == "Filing":
-            return "filing_iri"
-        if label == "Listing":
-            return "ticker"
-        if label == "Authority":
-            return "authority_id"
-        if label == "Contract":
-            return "ted_notice_id"
-        if label in ("Cpv", "Nuts", "Mic", "FirdsInstrument"):
-            return "code"
-        if label == "ExchangeRate":
-            return "date"  # composite key, but date is the discriminator
-        return "gmr_id"
+    _KEY_FIELD_BY_LABEL = {
+        "SanctionedEntity": "entity_id",
+        "Sanction": "entity_id",
+        "Filing": "filing_iri",
+        "Listing": "ticker",
+        "Authority": "authority_id",
+        "Contract": "ted_notice_id",
+        "Cpv": "code",
+        "Nuts": "code",
+        "Mic": "code",
+        "FirdsInstrument": "code",
+        "ExchangeRate": "date",  # composite key, but date is the discriminator
+    }
+
+    @classmethod
+    def _key_field(cls, label: str) -> str:
+        return cls._KEY_FIELD_BY_LABEL.get(label, "gmr_id")

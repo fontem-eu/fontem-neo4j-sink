@@ -30,3 +30,28 @@ include = ["neo4j_sink*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Pylint config — disable stylistic rules that don't fit an internal
+# event sink:
+#   missing-{module,class,function}-docstring — typed signatures +
+#     symbol names already document the surface; docstring stubs
+#     would just be lint-debt.
+#   too-few-public-methods — Pydantic-style typed envelopes and
+#     dataclass-only event holders legitimately have no methods.
+#   duplicate-code — pylint's similarity detector flags the
+#     near-identical `render_upsert_*` shapes, which is intrinsic
+#     to the cypher.RENDERERS pattern.
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "duplicate-code",
+]
+
+# Test files legitimately reach into private fragments (the cypher
+# helpers prefix `_name_clean_fragment` to mark them sink-internal,
+# but the tests are the cleanest place to lock that behavior down).
+[tool.pylint.basic]
+no-docstring-rgx = "^_|^test_"
