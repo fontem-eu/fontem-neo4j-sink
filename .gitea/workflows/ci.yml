@@ -43,6 +43,35 @@ jobs:
       - name: Secret scan (gitleaks)
         uses: ./.fontem-ci/actions/secret-scan
 
+  analyze:
+    needs: test
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: void42/fontem-ci
+          path: .fontem-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+      - name: Install dependencies and generate coverage
+        env:
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+        run: |
+          # Internal deps that aren't on the proxy index — clone + install.
+          tmpdir=$(mktemp -d)
+          for repo in fontem-event-schemas fontem-events; do
+              git clone --depth 1 \
+                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
+                  "$tmpdir/$repo"
+              pip install --no-cache-dir "$tmpdir/$repo"
+          done
+          pip install --no-cache-dir -e '.[test]'
+          pip install --no-cache-dir pylint pytest-cov
+          pytest --cov=neo4j_sink --cov-report=xml:coverage.xml || true
+      - uses: ./.fontem-ci/actions/sonar-scan
+        with:
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+
   build-deploy:
     needs: [test, security]
     if: github.ref == 'refs/heads/main'
