@@ -16,7 +16,7 @@ dependencies = [
     "fontem-event-schemas==0.1.0",
     "neo4j>=5.21.0",
     "psycopg[binary]>=3.3.4",
-    "prometheus-client>=0.21.1",
+    "prometheus-client>=0.22.0",
 ]
 
 [project.optional-dependencies]
