@@ -142,7 +142,7 @@ def render_upsert_contract(p: dict) -> CypherWrite:
         k: p[k] for k in (
             "title", "publication_date", "value_eur",
             "value_currency", "value_original",
-            "cpv", "nuts", "language",
+            "cpv", "nuts", "language", "country",
         ) if p.get(k) is not None
     }
     extras: list[tuple[str, str, dict]] = []
