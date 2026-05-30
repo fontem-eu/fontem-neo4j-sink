@@ -121,6 +121,31 @@ def test_contract_omits_relationships_when_keys_missing():
     assert w.extra_relationships in (None, [])
 
 
+def test_contract_writes_country_from_payload():
+    """country is the alpha-3 of the contracting authority, cascaded
+    onto the Contract at write time so jurisdictional panels (eg
+    /data-quality/contracts/by-country) don't need to traverse to
+    Authority. Earlier shape didn't include country on Contract — all
+    56k contracts in staging reported country=NULL until this fix."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS123-456789",
+        "authority_id": "auth-1",
+        "country": "DEU",
+    })
+    assert w.set_props["country"] == "DEU"
+
+
+def test_contract_omits_country_when_unset():
+    """Missing country must not write an empty/None property — leaves
+    the Contract.country untouched so a follow-up update with a real
+    country can fill it."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS123-456789",
+        "title": "no country here",
+    })
+    assert "country" not in w.set_props
+
+
 def test_taxonomy_code_keyed_by_system_and_code():
     w = render_upsert_taxonomy_code({
         "system": "cpv", "code": "45000000",
