@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9.0.0"]
+test = ["pytest>=9.0.1"]
 
 [project.scripts]
 neo4j-sink = "neo4j_sink.__main__:main"
