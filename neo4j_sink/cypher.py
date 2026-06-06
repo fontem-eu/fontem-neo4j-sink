@@ -143,6 +143,13 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             "title", "publication_date", "value_eur",
             "value_currency", "value_original",
             "cpv", "nuts", "language", "country",
+            # TED publication-number (e.g. "295342-2026") captured by
+            # the ETL via TED's v3 search API. Lets readers build the
+            # canonical detail URL without a runtime UUID→pub-num
+            # lookup. Null when the notice was queued but not yet
+            # published at ETL time — readers fall back to the
+            # /api/contracts/<id>/ted-link redirector.
+            "ted_publication_number",
         ) if p.get(k) is not None
     }
     extras: list[tuple[str, str, dict]] = []

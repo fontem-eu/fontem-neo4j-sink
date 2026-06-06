@@ -146,6 +146,32 @@ def test_contract_omits_country_when_unset():
     assert "country" not in w.set_props
 
 
+def test_contract_writes_ted_publication_number_from_payload():
+    """ted_publication_number is the human-readable TED identifier
+    (e.g. "295342-2026") captured by the ETL via TED's v3 search API.
+    Persisting it on the Contract node lets the API short-circuit the
+    runtime UUID→pub-num lookup when building the canonical TED
+    detail URL — without it every link click re-issues a TED search
+    request and pays the LRU-miss cost on cold pods."""
+    w = render_upsert_contract({
+        "ted_notice_id": "912f1717-1ace-413d-aa61-cd21cd6b95e7",
+        "ted_publication_number": "295342-2026",
+    })
+    assert w.set_props["ted_publication_number"] == "295342-2026"
+
+
+def test_contract_omits_ted_publication_number_when_unset():
+    """When the ETL couldn't resolve the publication-number (notice
+    queued but not yet published, or TED search returned no match),
+    don't write an empty property — leaves the Contract row clean
+    so a subsequent ETL pass that does resolve it can fill in."""
+    w = render_upsert_contract({
+        "ted_notice_id": "912f1717-1ace-413d-aa61-cd21cd6b95e7",
+        "title": "queued-only notice",
+    })
+    assert "ted_publication_number" not in w.set_props
+
+
 def test_taxonomy_code_keyed_by_system_and_code():
     w = render_upsert_taxonomy_code({
         "system": "cpv", "code": "45000000",
