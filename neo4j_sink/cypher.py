@@ -150,6 +150,14 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             # published at ETL time — readers fall back to the
             # /api/contracts/<id>/ted-link redirector.
             "ted_publication_number",
+            # Value-quality signals from the ETL's confidence scorer.
+            # value_low_confidence is the gate DQ / coverage queries use
+            # to exclude a contract from default value aggregates while
+            # keeping the node; the rest explain and support review.
+            "estimated_value_eur", "value_payable_eur",
+            "value_confidence", "value_confidence_consistency",
+            "value_confidence_plausibility", "value_quality_flag",
+            "value_low_confidence", "value_payable_discrepancy",
         ) if p.get(k) is not None
     }
     extras: list[tuple[str, str, dict]] = []

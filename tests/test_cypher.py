@@ -172,6 +172,46 @@ def test_contract_omits_ted_publication_number_when_unset():
     assert "ted_publication_number" not in w.set_props
 
 
+def test_contract_persists_value_quality_signals():
+    """The ETL's confidence scorer writes value_eur (the chosen,
+    TotalAmount-preferred value) plus the estimate / payable cross-checks
+    and the confidence + flag onto the node. value_low_confidence and
+    value_payable_discrepancy are stored even when False — the False is
+    meaningful (kept and counted)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n1",
+        "value_eur": 7_274_615.93,
+        "estimated_value_eur": 7_317_073.17,
+        "value_payable_eur": 7_274_615_930.0,
+        "value_confidence": 0.71,
+        "value_confidence_consistency": 0.71,
+        "value_confidence_plausibility": 1.0,
+        "value_quality_flag": "ok",
+        "value_low_confidence": False,
+        "value_payable_discrepancy": True,
+    })
+    assert w.set_props["value_eur"] == 7_274_615.93
+    assert w.set_props["estimated_value_eur"] == 7_317_073.17
+    assert w.set_props["value_payable_eur"] == 7_274_615_930.0
+    assert w.set_props["value_confidence"] == 0.71
+    assert w.set_props["value_quality_flag"] == "ok"
+    assert w.set_props["value_low_confidence"] is False
+    assert w.set_props["value_payable_discrepancy"] is True
+
+
+def test_contract_flags_low_confidence_value():
+    """A flagged value is persisted with value_low_confidence True so DQ /
+    coverage queries can exclude it from default aggregates."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n2",
+        "value_eur": 1.07e12,
+        "value_quality_flag": "implausible_magnitude",
+        "value_low_confidence": True,
+    })
+    assert w.set_props["value_low_confidence"] is True
+    assert w.set_props["value_quality_flag"] == "implausible_magnitude"
+
+
 def test_taxonomy_code_keyed_by_system_and_code():
     w = render_upsert_taxonomy_code({
         "system": "cpv", "code": "45000000",
