@@ -25,6 +25,7 @@ class CypherWrite:
     primary_key: dict           # {'gmr_id': '…'} or {'entity_id': '…'}
     set_props: dict             # the rest of the entity body
     extra_relationships: list[tuple[str, str, dict]] = None  # rel_type, target_iri, props
+    extra_labels: list[str] | None = None  # secondary labels, e.g. ['Lobbyist']
 
 
 def render_upsert_company(p: dict) -> CypherWrite:
@@ -232,6 +233,14 @@ def render_upsert_relationship(p: dict) -> CypherWrite:
     )
 
 
+# Per-system secondary labels promised in render_upsert_disclosure's
+# docstring (so dashboards can query :Lobbyist instead of the generic
+# :Disclosure). Applied by the sink's MERGE after the node is keyed.
+_SYSTEM_LABELS: dict[str, list[str]] = {
+    "eu-lobbying": ["Lobbyist"],
+}
+
+
 def render_upsert_disclosure(p: dict) -> CypherWrite:
     """Disclosure as a generic :Disclosure label keyed by
     (system, disclosure_id). Per-system label is added by the sink
@@ -252,7 +261,14 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
         ) if p.get(k) is not None
     }
     for k, v in (p.get("details") or {}).items():
-        if v is None or isinstance(v, (list, dict)):
+        if v is None or isinstance(v, dict):
+            continue
+        if isinstance(v, list):
+            # Keep list-of-scalar fields (e.g. lobbying `interests`) as a
+            # Neo4j array property so `WHERE 'climate' IN d.detail_interests`
+            # works; only nested / non-scalar lists are dropped.
+            if v and all(isinstance(x, (str, int, float, bool)) for x in v):
+                set_props[f"detail_{k}"] = v
             continue
         set_props[f"detail_{k}"] = v
     extras: list[tuple[str, str, dict]] = []
@@ -270,6 +286,7 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
         },
         set_props=set_props,
         extra_relationships=extras or None,
+        extra_labels=_SYSTEM_LABELS.get(p["system"]),
     )
 
 

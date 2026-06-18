@@ -265,6 +265,46 @@ def test_disclosure_filed_by_edge_to_company():
     assert any(r[0] == "FILED_BY" for r in rels)
 
 
+def test_lobbying_disclosure_gets_lobbyist_label_and_keeps_interests():
+    """eu-lobbying disclosures must carry the :Lobbyist secondary label
+    and preserve the `interests` list (a Neo4j array property), so the
+    dashboard can query :Lobbyist and `'climate' IN d.detail_interests`."""
+    w = render_upsert_disclosure({
+        "system": "eu-lobbying",
+        "disclosure_id": "TR-987",
+        "details": {
+            "name": "Acme Lobby",
+            "interests": ["climate", "energy", "trade"],
+            "category": "Companies",
+        },
+    })
+    assert w.label == "Disclosure"
+    assert w.extra_labels == ["Lobbyist"]
+    assert w.set_props["detail_interests"] == ["climate", "energy", "trade"]
+    assert w.set_props["detail_name"] == "Acme Lobby"
+
+
+def test_non_lobbying_disclosure_has_no_extra_label():
+    w = render_upsert_disclosure({
+        "system": "cdp", "disclosure_id": "CDP-1", "details": {"score": "A"},
+    })
+    assert w.extra_labels is None
+
+
+def test_nested_dict_details_still_dropped_but_scalar_list_kept():
+    w = render_upsert_disclosure({
+        "system": "eu-lobbying", "disclosure_id": "TR-1",
+        "details": {
+            "interests": ["a", "b"],          # scalar list -> kept
+            "nested": {"x": 1},               # dict -> dropped
+            "mixed": [{"y": 2}],              # non-scalar list -> dropped
+        },
+    })
+    assert w.set_props["detail_interests"] == ["a", "b"]
+    assert "detail_nested" not in w.set_props
+    assert "detail_mixed" not in w.set_props
+
+
 def test_disclosure_omits_filed_by_when_no_company():
     """EU lobbying register entries: registrant IS the Lobbyist,
     no parent Company. The renderer must skip the FILED_BY edge so

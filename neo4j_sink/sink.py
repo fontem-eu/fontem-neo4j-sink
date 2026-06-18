@@ -14,6 +14,7 @@ fontem-id IRIs (e.g. http://data.fontem.eu/id/Company/<gmr_id>).
 from __future__ import annotations
 
 import logging
+import re
 import os
 from collections import defaultdict
 
@@ -119,7 +120,8 @@ class Neo4jSink(EventConsumer):
             return ""
         return ", n.name_clean = apoc.text.clean(row.name)"
 
-    def _flush_bracket(
+    def _flush_bracket(  # pylint: disable=too-many-locals
+
         self, label: str, writes: list[CypherWrite],
     ) -> None:
         if label == "_SameAs":
@@ -155,10 +157,14 @@ class Neo4jSink(EventConsumer):
             label, "name" in writes[0].set_props,
         )
 
+        common_labels = set(writes[0].extra_labels or [])
+        for _w in writes[1:]:
+            common_labels &= set(_w.extra_labels or [])
         cypher = (
             f"UNWIND $rows AS row "
             f"MERGE (n:{label} {{ {key_match} }}) "
             f"SET {set_clause}"
+            + self._label_set_clause(sorted(common_labels))
         )
         with self._driver.session() as session:
             session.run(cypher, rows=rows)
@@ -207,6 +213,7 @@ class Neo4jSink(EventConsumer):
         cypher = (
             f"MERGE (n:{w.label} {{ {key_match} }}) "
             + (f"SET {set_clause}" if set_clause else "")
+            + self._label_set_clause(w.extra_labels)
         )
         with self._driver.session() as session:
             session.run(cypher, params)
@@ -254,6 +261,16 @@ class Neo4jSink(EventConsumer):
                 f"SET r += $props",
                 ak=a_key, bk=b_key, props=w.set_props,
             )
+
+    @staticmethod
+    def _label_set_clause(extra_labels) -> str:
+        """Cypher fragment that adds sanitised secondary labels to `n`.
+        Labels can't be parameterised, so they're interpolated — hence
+        the strict alphanumeric/underscore filter."""
+        if not extra_labels:
+            return ""
+        safe = [re.sub(r"\W", "", lbl) for lbl in extra_labels]
+        return "".join(f" SET n:`{lbl}`" for lbl in safe if lbl)
 
     @staticmethod
     def _predicate_to_rel_type(predicate: str) -> str:
