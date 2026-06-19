@@ -372,3 +372,11 @@ def test_name_clean_fragment_skipped_when_name_missing():
     must not blank out an existing name_clean by computing
     apoc.text.clean(NULL)."""
     assert Neo4jSink._name_clean_fragment("Company", has_name=False) == ""
+
+
+def test_filing_rejects_implausible_year():
+    # Botched XBRL period-end → no FinancialYear write (mirrors loader guard);
+    # keeps a queue reprocess from replaying old junk-year events.
+    assert render_upsert_filing({"gmr_id": "a", "year": 2039, "source": "edgar"}) is None
+    assert render_upsert_filing({"gmr_id": "a", "year": 1980, "source": "edgar"}) is None
+    assert render_upsert_filing({"gmr_id": "a", "year": 2024, "source": "edgar"}) is not None

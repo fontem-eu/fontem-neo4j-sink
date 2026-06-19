@@ -14,6 +14,8 @@ Per-entity (no bracket) updates fire one MERGE statement each.
 """
 from __future__ import annotations
 
+import datetime
+
 from dataclasses import dataclass
 from typing import Callable
 
@@ -59,13 +61,19 @@ def render_upsert_sanctioned_entity(p: dict) -> CypherWrite:
     )
 
 
-def render_upsert_filing(p: dict) -> CypherWrite:
+def render_upsert_filing(p: dict) -> "CypherWrite | None":
     """Filing is keyed by (gmr_id, year) per the Neo4j-era schema.
     Source is on the node, not in the key — Filing-EDGAR and
     Filing-ESEF for the same company-year overwrite each other
     here (matches today's behaviour; the de-collision is in
     Virtuoso where the IRI carries source).
     """
+    year = int(p["year"])
+    # Refuse an implausible fiscal year (botched XBRL period-end like 2039).
+    # Mirrors the loader guard so even a queue reprocess of old events can't
+    # replay junk years into the graph.
+    if not 1990 <= year <= datetime.date.today().year + 1:
+        return None
     set_props = {
         "source": p["source"],
         **{k: p[k] for k in (

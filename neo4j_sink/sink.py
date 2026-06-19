@@ -250,6 +250,10 @@ class Neo4jSink(EventConsumer):
         conventions."""
         a_label, a_key = self._iri_to_label_key(w.primary_key["src_iri"])
         b_label, b_key = self._iri_to_label_key(w.primary_key["dst_iri"])
+        # Never create a self-relationship (e.g. GLEIF self-consolidation,
+        # where a company is reported as SUBSIDIARY_OF itself).
+        if (a_label, a_key) == (b_label, b_key):
+            return
         rel_type = self._predicate_to_rel_type(w.primary_key["predicate"])
         a_field = self._key_field(a_label)
         b_field = self._key_field(b_label)
@@ -297,6 +301,9 @@ class Neo4jSink(EventConsumer):
         # edge attributes. A dataclass wrapper just renames the
         # indirection at every call site.
         tgt_label, tgt_key = self._iri_to_label_key(target_iri)
+        # Guard against a self-edge (src node == target node).
+        if tgt_label == src_label and src_key.get(self._key_field(src_label)) == tgt_key:
+            return
         direction = props.pop("_direction", "from_source")
         src_match = ", ".join(f"{k}: ${k}" for k in src_key.keys())
         tgt_field = self._key_field(tgt_label)

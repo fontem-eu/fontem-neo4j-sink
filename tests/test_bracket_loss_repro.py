@@ -246,3 +246,96 @@ def test_bracket_writes_grow_unboundedly_until_end():
 
     # 1000 writes accumulated, still no flush.
     assert len(sink._bracket_writes[_GRAPH]) == 1000
+
+
+def test_typed_relationship_skips_self_loop():
+    from neo4j_sink.cypher import CypherWrite  # pylint: disable=import-outside-toplevel
+    sink, calls = _make_sink_with_mock_driver()
+    iri = "http://data.fontem.eu/id/Company/abc"
+    w = CypherWrite(
+        label="_Relationship",
+        primary_key={"src_iri": iri, "dst_iri": iri, "predicate": "subsidiaryOf"},
+        set_props={},
+    )
+    sink._apply_typed_relationship(w)  # pylint: disable=protected-access
+    assert not calls  # a self-relationship issues no MERGE
+
+
+def test_typed_relationship_creates_normal_edge():
+    from neo4j_sink.cypher import CypherWrite  # pylint: disable=import-outside-toplevel
+    sink, calls = _make_sink_with_mock_driver()
+    w = CypherWrite(
+        label="_Relationship",
+        primary_key={
+            "src_iri": "http://data.fontem.eu/id/Company/aaa",
+            "dst_iri": "http://data.fontem.eu/id/Company/bbb",
+            "predicate": "subsidiaryOf",
+        },
+        set_props={},
+    )
+    sink._apply_typed_relationship(w)  # pylint: disable=protected-access
+    assert any("MERGE" in q for q, _ in calls)
+
+
+def test_apply_relationship_skips_self_edge():
+    sink, calls = _make_sink_with_mock_driver()
+    # src Company 'x' and a target IRI resolving to the same Company 'x'.
+    sink._apply_relationship(  # pylint: disable=protected-access
+        "Company", {"gmr_id": "x"}, "FILED_BY",
+        "http://data.fontem.eu/id/Company/x", {},
+    )
+    assert not calls  # self-edge issues no MERGE
+
+
+def test_apply_relationship_creates_normal_edge():
+    sink, calls = _make_sink_with_mock_driver()
+    sink._apply_relationship(  # pylint: disable=protected-access
+        "Company", {"gmr_id": "x"}, "FILED_BY",
+        "http://data.fontem.eu/id/Company/y", {},
+    )
+    assert any("MERGE" in q for q, _ in calls)
+
+
+def test_apply_one_attaches_extra_labels():
+    # Covers the per-system secondary-label path (_label_set_clause) so a
+    # lobbying disclosure lands as :Disclosure:Lobbyist.
+    from neo4j_sink.cypher import CypherWrite  # pylint: disable=import-outside-toplevel
+    sink, calls = _make_sink_with_mock_driver()
+    w = CypherWrite(
+        label="Disclosure",
+        primary_key={"disclosure_id": "d1", "system": "eu-lobbying"},
+        set_props={"title": "T"},
+        extra_labels=["Lobbyist"],
+    )
+    sink._apply_one(w)  # pylint: disable=protected-access
+    assert any("Lobbyist" in q for q, _ in calls)
+
+
+def test_apply_one_no_extra_labels_is_plain_merge():
+    from neo4j_sink.cypher import CypherWrite  # pylint: disable=import-outside-toplevel
+    sink, calls = _make_sink_with_mock_driver()
+    w = CypherWrite(
+        label="Company", primary_key={"gmr_id": "g1"},
+        set_props={"name": "Acme"},
+    )
+    sink._apply_one(w)  # pylint: disable=protected-access
+    assert calls and all("Lobbyist" not in q for q, _ in calls)
+
+
+def test_flush_bracket_applies_common_labels():
+    # Covers the bracket PUT-replace path: DETACH DELETE the label then
+    # UNWIND-MERGE the batch, attaching the labels common to the batch.
+    from neo4j_sink.cypher import CypherWrite  # pylint: disable=import-outside-toplevel
+    sink, calls = _make_sink_with_mock_driver()
+    writes = [
+        CypherWrite(label="Disclosure",
+                    primary_key={"disclosure_id": "a", "system": "eu-lobbying"},
+                    set_props={"title": "A"}, extra_labels=["Lobbyist"]),
+        CypherWrite(label="Disclosure",
+                    primary_key={"disclosure_id": "b", "system": "eu-lobbying"},
+                    set_props={"title": "B"}, extra_labels=["Lobbyist"]),
+    ]
+    sink._flush_bracket("Disclosure", writes)  # pylint: disable=protected-access
+    queries = [q for q, _ in calls]
+    assert any("DETACH DELETE" in q for q in queries)
+    assert any("Lobbyist" in q for q in queries)
