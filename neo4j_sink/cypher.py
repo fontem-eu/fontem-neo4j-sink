@@ -167,6 +167,12 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             "value_confidence", "value_confidence_consistency",
             "value_confidence_plausibility", "value_quality_flag",
             "value_low_confidence", "value_payable_discrepancy",
+            # Tender-integrity fields (eForms) — inputs to the SMSB
+            # single-bidder / non-open indicators + the DIGIWHIST CRI
+            # red flags.
+            "procedure_type", "tenders_received",
+            "award_criterion_type", "submission_deadline",
+            "is_framework", "eu_funded", "funding_programme",
         ) if p.get(k) is not None
     }
     extras: list[tuple[str, str, dict]] = []

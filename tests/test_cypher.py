@@ -380,3 +380,24 @@ def test_filing_rejects_implausible_year():
     assert render_upsert_filing({"gmr_id": "a", "year": 2039, "source": "edgar"}) is None
     assert render_upsert_filing({"gmr_id": "a", "year": 1980, "source": "edgar"}) is None
     assert render_upsert_filing({"gmr_id": "a", "year": 2024, "source": "edgar"}) is not None
+
+def test_contract_persists_integrity_fields():
+    """Tender-integrity fields land on the Contract node. is_framework=False
+    is meaningful (kept); tenders_received=1 is the single-bidder flag."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n2",
+        "procedure_type": "open",
+        "tenders_received": 1,
+        "award_criterion_type": "price",
+        "submission_deadline": "2026-02-15",
+        "is_framework": False,
+        "eu_funded": True,
+        "funding_programme": "RRF",
+    })
+    assert w.set_props["procedure_type"] == "open"
+    assert w.set_props["tenders_received"] == 1
+    assert w.set_props["award_criterion_type"] == "price"
+    assert w.set_props["submission_deadline"] == "2026-02-15"
+    assert w.set_props["is_framework"] is False
+    assert w.set_props["eu_funded"] is True
+    assert w.set_props["funding_programme"] == "RRF"
