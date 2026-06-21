@@ -15,9 +15,10 @@ Per-entity (no bracket) updates fire one MERGE statement each.
 from __future__ import annotations
 
 import datetime
-
 from dataclasses import dataclass
 from typing import Callable
+
+from fontem_event_schemas.integrity import contract_red_flags
 
 
 @dataclass
@@ -175,6 +176,11 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             "is_framework", "eu_funded", "funding_programme",
         ) if p.get(k) is not None
     }
+    # Materialise the shared integrity red flags (single-bidder, non-open,
+    # no-call, price-only + CRI-lite count) so they are hot-queryable in
+    # the graph rather than recomputed per query. One source of truth
+    # (fontem_event_schemas.integrity), shared with the Virtuoso sink + API.
+    set_props.update(contract_red_flags(p))
     extras: list[tuple[str, str, dict]] = []
     if aid := p.get("authority_id"):
         extras.append((

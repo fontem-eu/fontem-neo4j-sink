@@ -401,3 +401,26 @@ def test_contract_persists_integrity_fields():
     assert w.set_props["is_framework"] is False
     assert w.set_props["eu_funded"] is True
     assert w.set_props["funding_programme"] == "RRF"
+
+
+def test_contract_materialises_integrity_red_flags():
+    """The shared keystone flags are materialised onto the Contract node:
+    a single-bidder, no-call, price-only award trips all flags + count."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n3",
+        "tenders_received": 1,
+        "procedure_type": "neg-wo-call",
+        "award_criterion_type": "price",
+    })
+    assert w.set_props["is_single_bidder"] is True
+    assert w.set_props["is_non_open"] is True
+    assert w.set_props["is_no_call"] is True
+    assert w.set_props["is_price_only"] is True
+    assert w.set_props["integrity_red_flags"] == 4
+
+
+def test_contract_no_red_flags_when_inputs_absent():
+    """No integrity inputs → no flags materialised (unknown != flagged)."""
+    w = render_upsert_contract({"ted_notice_id": "n4", "title": "x"})
+    assert "is_single_bidder" not in w.set_props
+    assert "integrity_red_flags" not in w.set_props
