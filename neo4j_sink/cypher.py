@@ -258,7 +258,25 @@ def render_upsert_relationship(p: dict) -> CypherWrite:
 # :Disclosure). Applied by the sink's MERGE after the node is keyed.
 _SYSTEM_LABELS: dict[str, list[str]] = {
     "eu-lobbying": ["Lobbyist"],
+    "eu-cohesion": ["CohesionProject"],
 }
+
+
+def _flatten_disclosure_details(details: dict | None) -> dict:
+    """Flatten the details bag into detail_<key> props. Nested dicts and
+    non-scalar lists are dropped; lists of scalars are kept as Neo4j array
+    properties. `programme_code` is a :Programme node reference (linked by
+    the caller), not a stored detail."""
+    props: dict = {}
+    for k, v in (details or {}).items():
+        if k == "programme_code" or v is None or isinstance(v, dict):
+            continue
+        if isinstance(v, list):
+            if v and all(isinstance(x, (str, int, float, bool)) for x in v):
+                props[f"detail_{k}"] = v
+            continue
+        props[f"detail_{k}"] = v
+    return props
 
 
 def render_upsert_disclosure(p: dict) -> CypherWrite:
@@ -280,22 +298,22 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
             "year", "title", "url",
         ) if p.get(k) is not None
     }
-    for k, v in (p.get("details") or {}).items():
-        if v is None or isinstance(v, dict):
-            continue
-        if isinstance(v, list):
-            # Keep list-of-scalar fields (e.g. lobbying `interests`) as a
-            # Neo4j array property so `WHERE 'climate' IN d.detail_interests`
-            # works; only nested / non-scalar lists are dropped.
-            if v and all(isinstance(x, (str, int, float, bool)) for x in v):
-                set_props[f"detail_{k}"] = v
-            continue
-        set_props[f"detail_{k}"] = v
+    set_props.update(_flatten_disclosure_details(p.get("details")))
     extras: list[tuple[str, str, dict]] = []
     if cid := p.get("company_gmr_id"):
         extras.append((
             "FILED_BY",
             f"http://data.fontem.eu/id/Company/{cid}",
+            {"_direction": "from_source"},
+        ))
+    # Cohesion projects link to their funding :Programme (itself
+    # FINANCED_BY a :Fund). The loader passes the stable programme code
+    # in details; the Programme/Fund taxonomy nodes are emitted ahead of
+    # the disclosure so the MATCH resolves.
+    if prog_code := (p.get("details") or {}).get("programme_code"):
+        extras.append((
+            "UNDER_PROGRAMME",
+            f"http://data.fontem.eu/id/Programme/{prog_code}",
             {"_direction": "from_source"},
         ))
     return CypherWrite(

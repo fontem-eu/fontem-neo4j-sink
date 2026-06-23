@@ -284,6 +284,28 @@ def test_lobbying_disclosure_gets_lobbyist_label_and_keeps_interests():
     assert w.set_props["detail_name"] == "Acme Lobby"
 
 
+def test_cohesion_disclosure_label_and_programme_link():
+    """eu-cohesion disclosures get the :CohesionProject label + an
+    UNDER_PROGRAMME edge to the :Programme node (from programme_code in
+    details, which is itself not stored as a detail property)."""
+    w = render_upsert_disclosure({
+        "system": "eu-cohesion",
+        "disclosure_id": "Q123",
+        "company_gmr_id": "ben-1",
+        "details": {
+            "programme": "Competitiveness PL", "fund": "ERDF",
+            "programme_code": "prog-abc", "eu_contribution": 59877.7,
+        },
+    })
+    assert w.extra_labels == ["CohesionProject"]
+    assert "detail_programme_code" not in w.set_props
+    assert w.set_props["detail_programme"] == "Competitiveness PL"
+    rels = {(r[0], r[1]) for r in (w.extra_relationships or [])}
+    assert ("FILED_BY", "http://data.fontem.eu/id/Company/ben-1") in rels
+    assert ("UNDER_PROGRAMME",
+            "http://data.fontem.eu/id/Programme/prog-abc") in rels
+
+
 def test_non_lobbying_disclosure_has_no_extra_label():
     w = render_upsert_disclosure({
         "system": "cdp", "disclosure_id": "CDP-1", "details": {"score": "A"},

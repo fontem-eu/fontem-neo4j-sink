@@ -340,6 +340,8 @@ class Neo4jSink(EventConsumer):
         "Contract": "ted_notice_id",
         "Cpv": "code",
         "Nuts": "code",
+        "Programme": "code",
+        "Fund": "code",
         "Mic": "code",
         "FirdsInstrument": "code",
         "ExchangeRate": "date",  # composite key, but date is the discriminator
