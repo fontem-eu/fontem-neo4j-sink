@@ -446,3 +446,21 @@ def test_contract_no_red_flags_when_inputs_absent():
     w = render_upsert_contract({"ted_notice_id": "n4", "title": "x"})
     assert "is_single_bidder" not in w.set_props
     assert "integrity_red_flags" not in w.set_props
+
+
+def test_taxonomy_code_carries_per_system_label():
+    """TaxonomyCode gets a :TaxonomyCode label plus a per-system label so
+    relationships/queries can MATCH by system (e.g. :Programme, :Fund, :Cpv).
+    Without it a FINANCED_BY/UNDER_PROGRAMME edge to a :Programme never
+    resolves."""
+    w = render_upsert_taxonomy_code({
+        "system": "programme", "code": "abc", "label": "Competitiveness PL",
+    })
+    assert w.label == "TaxonomyCode"
+    assert w.extra_labels == ["Programme"]
+    wf = render_upsert_taxonomy_code({"system": "fund", "code": "erdf",
+                                      "label": "ERDF"})
+    assert wf.extra_labels == ["Fund"]
+    # hyphenated systems camel-case correctly
+    wl = render_upsert_taxonomy_code({"system": "eu-cohesion", "code": "x"})
+    assert wl.extra_labels == ["EuCohesion"]

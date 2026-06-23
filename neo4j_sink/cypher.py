@@ -207,6 +207,12 @@ def render_upsert_taxonomy_code(p: dict) -> CypherWrite:
     (system, code). The sink also adds a per-system label via
     SET n:<System> for label-specific queries (e.g. :CPV {code: ...})."""
     label = "TaxonomyCode"
+    # Per-system secondary label (e.g. :Cpv, :Nuts, :Programme, :Fund) so
+    # relationships and queries can MATCH a node by its system's label, which
+    # _KEY_FIELD_BY_LABEL keys by `code`. Without this a relationship targeting
+    # http://data.fontem.eu/id/Programme/<code> resolves to a :Programme that
+    # never exists.
+    sys_camel = p["system"].replace("-", "_").title().replace("_", "")
     set_props = {
         k: p[k] for k in (
             "label", "label_lang", "level", "description",
@@ -216,7 +222,6 @@ def render_upsert_taxonomy_code(p: dict) -> CypherWrite:
     if parent := p.get("parent_code"):
         # CHILD_OF edge to the parent code in the same system.
         # The sink resolves the parent via system+parent_code.
-        sys_camel = p["system"].replace("-", "_").title().replace("_", "")
         parent_iri = f"http://data.fontem.eu/id/{sys_camel}/{parent}"
         extras.append((
             "CHILD_OF", parent_iri, {"_direction": "from_source"},
@@ -226,6 +231,7 @@ def render_upsert_taxonomy_code(p: dict) -> CypherWrite:
         primary_key={"system": p["system"], "code": p["code"]},
         set_props=set_props,
         extra_relationships=extras or None,
+        extra_labels=[sys_camel],
     )
 
 
