@@ -339,3 +339,83 @@ def test_flush_bracket_applies_common_labels():
     queries = [q for q, _ in calls]
     assert any("DETACH DELETE" in q for q in queries)
     assert any("Lobbyist" in q for q in queries)
+
+
+# ── batched non-bracket apply (drain-throughput fix) ──────────
+
+
+def _contract(nid: str, seq: int, authority_id="auth1",
+              company_gmr_id="co1", **extra) -> EventEnvelope:
+    payload = {
+        "ted_notice_id": nid,
+        "title": "T", "publication_date": "2026-01-15",
+        "value_eur": 1000, "value_currency": "EUR",
+        "procedure_type": "open", "tenders_received": 3,
+        "authority_id": authority_id, "company_gmr_id": company_gmr_id,
+    }
+    payload.update(extra)
+    return _ev("UpsertContract", payload, seq)
+
+
+def test_non_bracket_contracts_are_unwind_batched():
+    """5 contracts (node + AWARDED + AWARDED_TO each) must collapse to
+    3 UNWIND session.run calls, not 15 per-event ones — this is the
+    drain-throughput fix."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([_contract(f"n{i}-2026", seq=10 + i) for i in range(5)])
+    queries = [q for q, _ in calls]
+    assert queries, "nothing rendered"
+    assert all("UNWIND $rows AS row" in q for q in queries), queries
+    assert len(calls) == 3, queries
+    node_calls = [c for c in calls if "MERGE (n:Contract" in c[0]]
+    assert len(node_calls) == 1
+    assert len(node_calls[0][1]["rows"]) == 5
+    rel_calls = [c for c in calls if "-[r:" in c[0]]
+    assert len(rel_calls) == 2
+    assert all(len(c[1]["rows"]) == 5 for c in rel_calls)
+
+
+def test_batched_node_merge_uses_props_map_and_skips_absent_edges():
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([_contract("solo-2026", seq=1,
+                           company_gmr_id=None, authority_id=None)])
+    node = [c for c in calls if "MERGE (n:Contract" in c[0]][0]
+    assert "SET n += row.props" in node[0]
+    row = node[1]["rows"][0]
+    assert row["ted_notice_id"] == "solo-2026"
+    assert row["props"]["procedure_type"] == "open"
+    assert row["props"]["tenders_received"] == 3
+    assert not [c for c in calls if "-[r:" in c[0]]
+
+
+def test_same_key_writes_collapse_last_wins():
+    """Two upserts of one company in a batch collapse to a single node
+    row; later set_props win per field, earlier fields persist — same
+    result as a sequential per-event apply."""
+    sink, calls = _make_sink_with_mock_driver()
+    e1 = _ev("UpsertCompany",
+             {"gmr_id": "c1", "name": "Old", "country": "FR"}, 1)
+    e2 = _ev("UpsertCompany",
+             {"gmr_id": "c1", "name": "New", "lei": "X"}, 2)
+    sink.handle([e1, e2])
+    node_calls = [c for c in calls if "MERGE (n:Company" in c[0]]
+    assert len(node_calls) == 1
+    rows = node_calls[0][1]["rows"]
+    assert len(rows) == 1
+    props = rows[0]["props"]
+    assert props["name"] == "New"
+    assert props["country"] == "FR"
+    assert props["lei"] == "X"
+
+
+def test_directional_edges_keep_orientation_when_batched():
+    """AWARDED is from_target (Authority->Contract); AWARDED_TO is
+    from_source (Contract->Company). Batching must preserve both."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([_contract("d-2026", seq=1)])
+    rel_calls = {c[0].split("MERGE ", 1)[1].split(" ", 1)[0]: c
+                 for c in calls if "-[r:" in c[0]}
+    awarded = [q for q in rel_calls if "[r:AWARDED]" in q]
+    awarded_to = [q for q in rel_calls if "[r:AWARDED_TO]" in q]
+    assert awarded and "(t)-[r:AWARDED]->(s)" in awarded[0]
+    assert awarded_to and "(s)-[r:AWARDED_TO]->(t)" in awarded_to[0]

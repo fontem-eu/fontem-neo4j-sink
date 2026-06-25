@@ -46,6 +46,11 @@ class Neo4jSink(EventConsumer):
     def handle(self, batch: list[EventEnvelope]) -> None:
         bracket_writes = self._bracket_writes
         bracket_label = self._bracket_label
+        # Non-bracketed writes are accumulated and applied in one
+        # UNWIND-batched pass per handle() (was a session.run() per
+        # event — the per-relationship MATCH+MERGE that pinned the
+        # drain to ~33 ev/s while Neo4j sat ~90% idle).
+        pending: list[CypherWrite] = []
 
         for ev in batch:
             if ev.event_type == "BeginGraphReplace":
@@ -62,6 +67,13 @@ class Neo4jSink(EventConsumer):
                 continue
 
             if ev.event_type == "EndGraphReplace":
+                # Apply pending non-bracketed writes that arrived
+                # before this End first — the old per-event path
+                # applied them immediately, i.e. before the bracket
+                # flush, so a bracket edge targeting one still resolves.
+                if pending:
+                    self._apply_batch(pending)
+                    pending = []
                 graph = ev.payload["graph_iri"]
                 writes = bracket_writes.pop(graph, None)
                 label = bracket_label.pop(graph, None)
@@ -88,7 +100,10 @@ class Neo4jSink(EventConsumer):
             if target is not None:
                 bracket_writes[target].append(write)
             else:
-                self._apply_one(write)
+                pending.append(write)
+
+        if pending:
+            self._apply_batch(pending)
 
     # ── implementation ────────────────────────────────────
 
@@ -181,6 +196,162 @@ class Neo4jSink(EventConsumer):
         # is just a batching hint. We don't pre-delete.
         for w in writes:
             self._apply_same_as(w)
+
+    def _apply_batch(self, writes: list[CypherWrite]) -> None:
+        """Apply a run of non-bracketed writes in UNWIND-grouped passes
+        instead of one session.run() per event. Order within the batch
+        is preserved: nodes are MERGEd first (so same-batch edges
+        resolve), then their extra-relationships, then typed
+        relationships, then SameAs."""
+        same_as = [w for w in writes if w.label == "_SameAs"]
+        typed_rels = [w for w in writes if w.label == "_Relationship"]
+        nodes = [w for w in writes
+                 if w.label not in ("_SameAs", "_Relationship")]
+        rel_items = self._flush_nodes(nodes)
+        self._flush_extra_relationships(rel_items)
+        self._flush_typed_relationships(typed_rels)
+        for w in same_as:
+            self._apply_same_as(w)
+
+    @staticmethod
+    def _collapse_node_writes(nodes: list[CypherWrite]) -> list[CypherWrite]:
+        """Merge same-(label, primary_key) writes in arrival (seq)
+        order: later set_props win per field, labels union, edges
+        concatenate — so the node is MERGEd once with the same result
+        a sequential per-event apply would give."""
+        collapsed: dict = {}
+        order: list = []
+        for w in nodes:
+            key = (w.label, tuple(sorted(w.primary_key.items())))
+            cur = collapsed.get(key)
+            if cur is None:
+                collapsed[key] = CypherWrite(
+                    label=w.label,
+                    primary_key=dict(w.primary_key),
+                    set_props=dict(w.set_props),
+                    extra_relationships=list(w.extra_relationships or []),
+                    extra_labels=list(w.extra_labels or []),
+                )
+                order.append(key)
+                continue
+            cur.set_props.update(w.set_props)
+            if w.extra_labels:
+                cur.extra_labels = sorted(
+                    set(cur.extra_labels) | set(w.extra_labels))
+            if w.extra_relationships:
+                cur.extra_relationships.extend(w.extra_relationships)
+        return [collapsed[k] for k in order]
+
+    def _flush_nodes(self, nodes: list[CypherWrite]) -> list:
+        """UNWIND-MERGE node writes grouped by (label, key-shape,
+        extra-labels), collapsing same-key writes first. Returns the
+        flattened extra-relationship items to flush next."""
+        merged = self._collapse_node_writes(nodes)
+        groups: dict = defaultdict(list)
+        for w in merged:
+            gkey = (w.label,
+                    tuple(sorted(w.primary_key.keys())),
+                    tuple(w.extra_labels or []))
+            groups[gkey].append(w)
+        for (label, keyset, extra_labels), ws in groups.items():
+            self._unwind_merge_nodes(label, keyset, list(extra_labels), ws)
+        rel_items: list = []
+        for w in merged:
+            for rel_type, target_iri, props in (w.extra_relationships or []):
+                rel_items.append(
+                    (w.label, w.primary_key, rel_type, target_iri, props))
+        return rel_items
+
+    def _unwind_merge_nodes(self, label, keyset, extra_labels, writes) -> None:
+        key_match = ", ".join(f"{k}: row.{k}" for k in keyset)
+        rows = []
+        for w in writes:
+            row = {k: w.primary_key[k] for k in keyset}
+            row["props"] = w.set_props
+            rows.append(row)
+        cypher = (
+            f"UNWIND $rows AS row "
+            f"MERGE (n:{label} {{ {key_match} }}) "
+            f"SET n += row.props"
+        )
+        if label in ("Company", "Authority"):
+            # Materialise name_clean for the resolver range index, but
+            # only when this row carries a name — rows in one group can
+            # now vary since SET uses += row.props.
+            cypher += (
+                " SET n.name_clean = CASE WHEN row.props.name IS NOT NULL "
+                "THEN apoc.text.clean(row.props.name) ELSE n.name_clean END"
+            )
+        cypher += self._label_set_clause(extra_labels)
+        with self._driver.session() as session:
+            session.run(cypher, rows=rows)
+
+    def _flush_extra_relationships(  # pylint: disable=too-many-locals
+        self, rel_items: list,
+    ) -> None:
+        """Batch the Company/Authority/Contract extra-relationship edges
+        by (src_label, src-key-shape, tgt_label, rel_type, direction)
+        into one UNWIND MATCH+MERGE per group."""
+        groups: dict = defaultdict(list)
+        for src_label, src_key, rel_type, target_iri, props in rel_items:
+            tgt_label, tgt_key = self._iri_to_label_key(target_iri)
+            if (tgt_label == src_label
+                    and src_key.get(self._key_field(src_label)) == tgt_key):
+                continue
+            edge_props = dict(props)
+            direction = edge_props.pop("_direction", "from_source")
+            gkey = (src_label, tuple(sorted(src_key.keys())),
+                    tgt_label, rel_type, direction)
+            groups[gkey].append((src_key, tgt_key, edge_props))
+        for gkey, items in groups.items():
+            src_label, src_keyset, tgt_label, rel_type, direction = gkey
+            src_match = ", ".join(f"{k}: row.{k}" for k in src_keyset)
+            tgt_field = self._key_field(tgt_label)
+            if direction == "from_target":
+                arrow = f"(t)-[r:{rel_type}]->(s)"
+            else:
+                arrow = f"(s)-[r:{rel_type}]->(t)"
+            cypher = (
+                f"UNWIND $rows AS row "
+                f"MATCH (s:{src_label} {{ {src_match} }}) "
+                f"MATCH (t:{tgt_label} {{ {tgt_field}: row.tgt_key }}) "
+                f"MERGE {arrow} "
+                f"SET r += row.props"
+            )
+            rows = [{**src_key, "tgt_key": tgt_key, "props": p}
+                    for src_key, tgt_key, p in items]
+            with self._driver.session() as session:
+                session.run(cypher, rows=rows)
+
+    def _flush_typed_relationships(  # pylint: disable=too-many-locals
+        self, writes: list[CypherWrite],
+    ) -> None:
+        """Batch UpsertRelationship (_Relationship) events by
+        (src_label, dst_label, rel_type) into one UNWIND MATCH+MERGE
+        per group."""
+        groups: dict = defaultdict(list)
+        for w in writes:
+            a_label, a_key = self._iri_to_label_key(w.primary_key["src_iri"])
+            b_label, b_key = self._iri_to_label_key(w.primary_key["dst_iri"])
+            if (a_label, a_key) == (b_label, b_key):
+                continue
+            rel_type = self._predicate_to_rel_type(w.primary_key["predicate"])
+            groups[(a_label, b_label, rel_type)].append(
+                (a_key, b_key, w.set_props))
+        for (a_label, b_label, rel_type), items in groups.items():
+            a_field = self._key_field(a_label)
+            b_field = self._key_field(b_label)
+            cypher = (
+                f"UNWIND $rows AS row "
+                f"MATCH (a:{a_label} {{ {a_field}: row.ak }}) "
+                f"MATCH (b:{b_label} {{ {b_field}: row.bk }}) "
+                f"MERGE (a)-[r:{rel_type}]->(b) "
+                f"SET r += row.props"
+            )
+            rows = [{"ak": ak, "bk": bk, "props": props}
+                    for ak, bk, props in items]
+            with self._driver.session() as session:
+                session.run(cypher, rows=rows)
 
     def _apply_one(self, w: CypherWrite) -> None:
         """Per-event MERGE for events delivered outside a
