@@ -174,6 +174,11 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             "procedure_type", "tenders_received",
             "award_criterion_type", "submission_deadline",
             "is_framework", "eu_funded", "funding_programme",
+            # eForms procedure id + notice type, and (on modifications)
+            # the original award's publication-number. procedure_id is the
+            # join key the MODIFIES linking pass uses; notice_type marks
+            # can-modif contracts.
+            "procedure_id", "notice_type", "modifies_publication_number",
         ) if p.get(k) is not None
     }
     # Materialise the shared integrity red flags (single-bidder, non-open,

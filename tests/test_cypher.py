@@ -464,3 +464,18 @@ def test_taxonomy_code_carries_per_system_label():
     # hyphenated systems camel-case correctly
     wl = render_upsert_taxonomy_code({"system": "eu-cohesion", "code": "x"})
     assert wl.extra_labels == ["EuCohesion"]
+
+
+def test_contract_stamps_procedure_and_modification_fields():
+    """The incremental loader stamps procedure_id + notice_type, and
+    modifies_publication_number on can-modif contracts. The sink must
+    render them so the MODIFIES linking pass can join on procedure_id."""
+    w = render_upsert_contract({
+        "ted_notice_id": "uuid-mod",
+        "procedure_id": "proc-7bcd",
+        "notice_type": "can-modif",
+        "modifies_publication_number": "708565-2022",
+    })
+    assert w.set_props["procedure_id"] == "proc-7bcd"
+    assert w.set_props["notice_type"] == "can-modif"
+    assert w.set_props["modifies_publication_number"] == "708565-2022"
