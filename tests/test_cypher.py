@@ -479,3 +479,24 @@ def test_contract_stamps_procedure_and_modification_fields():
     assert w.set_props["procedure_id"] == "proc-7bcd"
     assert w.set_props["notice_type"] == "can-modif"
     assert w.set_props["modifies_publication_number"] == "708565-2022"
+
+
+def test_contract_renders_modification_before_values():
+    """A modification's before-values pass through to set_props — the
+    before->after delta consumers query to flag suspicious value changes."""
+    w = render_upsert_contract({
+        "ted_notice_id": "24082-2024",
+        "notice_type": "can-modif",
+        "value_eur": 2184.6,
+        "value_original": 2184.6,
+        "value_before_eur": 1092.3,
+        "value_before_original": 1092.3,
+    })
+    assert w.set_props["value_before_eur"] == 1092.3
+    assert w.set_props["value_before_original"] == 1092.3
+
+
+def test_contract_omits_before_values_when_unset():
+    w = render_upsert_contract({"ted_notice_id": "x", "value_eur": 5.0})
+    assert "value_before_eur" not in w.set_props
+    assert "value_before_original" not in w.set_props

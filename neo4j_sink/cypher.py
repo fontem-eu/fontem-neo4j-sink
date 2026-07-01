@@ -152,6 +152,7 @@ def render_upsert_contract(p: dict) -> CypherWrite:
         k: p[k] for k in (
             "title", "publication_date", "value_eur",
             "value_currency", "value_original",
+            "value_before_eur", "value_before_original",
             "cpv", "nuts", "language", "country",
             # TED publication-number (e.g. "295342-2026") captured by
             # the ETL via TED's v3 search API. Lets readers build the
