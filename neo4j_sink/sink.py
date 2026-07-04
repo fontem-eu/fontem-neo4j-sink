@@ -89,6 +89,13 @@ class Neo4jSink(EventConsumer):
             renderer = RENDERERS.get(ev.event_type)
             if renderer is None:
                 continue
+            if ev.op == "delete":
+                # Entity deletes are a Virtuoso-side concern (subject
+                # drop); rendering a delete's {"iri"} payload here
+                # would KeyError on the schema fields. Skip, never
+                # poison the drain.
+                logger.debug("ignoring delete op for %s", ev.iri)
+                continue
             write = renderer(ev.payload)
             if write is None:
                 continue
@@ -119,6 +126,48 @@ class Neo4jSink(EventConsumer):
         if len(writes) == 1:
             return next(iter(writes))
         return None
+
+    # ── InvestmentFund relabel semantics ──────────────────────────
+    #
+    # Funds share the Company gmr_id namespace (same UUID5 derivation)
+    # and usually FIRST enter the graph as :Company (GLEIF/EDGAR load
+    # everything with an LEI). UpsertInvestmentFund therefore means
+    # "this entity IS a fund": relabel any existing :Company node in
+    # place — keeping the node, its properties and every edge — and
+    # only then MERGE, so the identity never splits into two nodes.
+    # The reverse never happens implicitly: a later UpsertCompany for
+    # a relabeled fund refreshes the node's properties but does NOT
+    # relabel it back — OpenFIGI instrument evidence outranks the
+    # kind-agnostic GLEIF/EDGAR company refresh.
+    _IFUND_MERGE_CYPHER = (
+        "UNWIND $rows AS row "
+        "OPTIONAL MATCH (c:Company {gmr_id: row.gmr_id}) "
+        "FOREACH (x IN CASE WHEN c IS NULL THEN [] ELSE [c] END | "
+        "SET x:InvestmentFund REMOVE x:Company) "
+        "WITH row "
+        "MERGE (n:InvestmentFund {gmr_id: row.gmr_id}) "
+        "SET n += row.props"
+    )
+    _COMPANY_REFRESH_FUND_CYPHER = (
+        "UNWIND $rows AS row "
+        "MATCH (f:InvestmentFund {gmr_id: row.gmr_id}) "
+        "SET f += row.props"
+    )
+    _COMPANY_MERGE_NON_FUND_CYPHER = (
+        "UNWIND $rows AS row "
+        "WITH row WHERE NOT EXISTS { "
+        "MATCH (:InvestmentFund {gmr_id: row.gmr_id}) } "
+        "MERGE (n:Company {gmr_id: row.gmr_id}) "
+        "SET n += row.props"
+    )
+
+    @staticmethod
+    def _match_label(label: str) -> str:
+        """Label expression for MATCHing an entity by graph identity.
+        Corporate gmr_ids can live under :Company or :InvestmentFund
+        (relabeled funds keep their gmr_id), so Company-IRI targets
+        must match either label or fund edges silently vanish."""
+        return "Company|InvestmentFund" if label == "Company" else label
 
     @staticmethod
     def _name_clean_fragment(label: str, has_name: bool) -> str:
@@ -269,6 +318,23 @@ class Neo4jSink(EventConsumer):
             row = {k: w.primary_key[k] for k in keyset}
             row["props"] = w.set_props
             rows.append(row)
+        if label == "InvestmentFund":
+            with self._driver.session() as session:
+                session.run(self._IFUND_MERGE_CYPHER, rows=rows)
+            return
+        if label == "Company":
+            clean = (
+                " SET n.name_clean = CASE WHEN row.props.name IS NOT NULL "
+                "THEN apoc.text.clean(row.props.name) ELSE n.name_clean END"
+            )
+            with self._driver.session() as session:
+                session.run(self._COMPANY_REFRESH_FUND_CYPHER, rows=rows)
+                session.run(
+                    self._COMPANY_MERGE_NON_FUND_CYPHER + clean
+                    + self._label_set_clause(extra_labels),
+                    rows=rows,
+                )
+            return
         cypher = (
             f"UNWIND $rows AS row "
             f"MERGE (n:{label} {{ {key_match} }}) "
@@ -314,7 +380,8 @@ class Neo4jSink(EventConsumer):
             cypher = (
                 f"UNWIND $rows AS row "
                 f"MATCH (s:{src_label} {{ {src_match} }}) "
-                f"MATCH (t:{tgt_label} {{ {tgt_field}: row.tgt_key }}) "
+                f"MATCH (t:{self._match_label(tgt_label)} "
+                f"{{ {tgt_field}: row.tgt_key }}) "
                 f"MERGE {arrow} "
                 f"SET r += row.props"
             )
@@ -343,8 +410,8 @@ class Neo4jSink(EventConsumer):
             b_field = self._key_field(b_label)
             cypher = (
                 f"UNWIND $rows AS row "
-                f"MATCH (a:{a_label} {{ {a_field}: row.ak }}) "
-                f"MATCH (b:{b_label} {{ {b_field}: row.bk }}) "
+                f"MATCH (a:{self._match_label(a_label)} {{ {a_field}: row.ak }}) "
+                f"MATCH (b:{self._match_label(b_label)} {{ {b_field}: row.bk }}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
                 f"SET r += row.props"
             )
@@ -405,7 +472,8 @@ class Neo4jSink(EventConsumer):
             return
         with self._driver.session() as session:
             session.run(
-                f"MATCH (a:{a_label}), (b:{b_label}) "
+                f"MATCH (a:{self._match_label(a_label)}), "
+                f"(b:{self._match_label(b_label)}) "
                 f"WHERE a.{self._key_field(a_label)} = $ak "
                 f"  AND b.{self._key_field(b_label)} = $bk "
                 f"MERGE (a)-[r:SAME_AS]->(b) "
@@ -430,7 +498,8 @@ class Neo4jSink(EventConsumer):
         b_field = self._key_field(b_label)
         with self._driver.session() as session:
             session.run(
-                f"MATCH (a:{a_label}), (b:{b_label}) "
+                f"MATCH (a:{self._match_label(a_label)}), "
+                f"(b:{self._match_label(b_label)}) "
                 f"WHERE a.{a_field} = $ak AND b.{b_field} = $bk "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
                 f"SET r += $props",

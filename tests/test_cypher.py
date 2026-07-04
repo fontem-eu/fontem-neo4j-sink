@@ -5,6 +5,7 @@
 # underscore prefix on the helper marks it sink-internal vs API;
 # pylint's blanket no-touch policy is the wrong default here.
 from neo4j_sink.cypher import (
+    render_upsert_investment_fund,
     RENDERERS, label_for_graph,
     render_assert_same_as, render_upsert_authority,
     render_upsert_company, render_upsert_contract,
@@ -357,7 +358,7 @@ def test_exchange_rate_composite_key():
 def test_renderer_registry_covers_all_event_types():
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
-        "UpsertCompany", "UpsertListing",
+        "UpsertCompany", "UpsertInvestmentFund", "UpsertListing",
         "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
@@ -500,3 +501,57 @@ def test_contract_omits_before_values_when_unset():
     w = render_upsert_contract({"ted_notice_id": "x", "value_eur": 5.0})
     assert "value_before_eur" not in w.set_props
     assert "value_before_original" not in w.set_props
+
+
+# ── InvestmentFund entity (funds are not companies) ───────────────
+
+
+def test_investment_fund_renderer_keys_by_gmr_id():
+    w = render_upsert_investment_fund({
+        "gmr_id": "0b6cbfa6-6a30-5efc-9b4f-3e56d0f3f5a2",
+        "name": "EXAMPLE UCITS FUND",
+        "lei": "2138008K5B3Z4E8DHN12",
+        "fund_type": "Open-End Fund",
+    })
+    assert w.label == "InvestmentFund"
+    assert w.primary_key == {"gmr_id": "0b6cbfa6-6a30-5efc-9b4f-3e56d0f3f5a2"}
+    assert w.set_props["fund_type"] == "Open-End Fund"
+    assert "country" not in w.set_props     # unset stays absent
+
+
+def test_listing_carries_security_type():
+    w = render_upsert_listing({
+        "ticker": "EGL", "company_gmr_id": "g1",
+        "exchange": "PL", "security_type": "Common Stock",
+    })
+    assert w.set_props["security_type"] == "Common Stock"
+
+
+def test_match_label_disjunction_for_company_only():
+    """Company-IRI targets must match relabeled funds too, or fund
+    edges (LISTED_AS, SAME_AS, typed rels) silently vanish."""
+    assert Neo4jSink._match_label("Company") == "Company|InvestmentFund"
+    assert Neo4jSink._match_label("Listing") == "Listing"
+    assert Neo4jSink._match_label("InvestmentFund") == "InvestmentFund"
+
+
+def test_investment_fund_merge_relabels_in_place():
+    """The fund MERGE must relabel an existing :Company node (keeping
+    its edges) BEFORE merging, and never leave the node dual-labeled."""
+    c = Neo4jSink._IFUND_MERGE_CYPHER
+    assert "OPTIONAL MATCH (c:Company {gmr_id: row.gmr_id})" in c
+    assert "SET x:InvestmentFund REMOVE x:Company" in c
+    assert "MERGE (n:InvestmentFund {gmr_id: row.gmr_id})" in c
+    # relabel must come before the merge
+    assert c.index("REMOVE x:Company") < c.index("MERGE (n:InvestmentFund")
+
+
+def test_company_merge_never_resplits_a_fund():
+    """A later UpsertCompany for a relabeled fund must refresh props on
+    the fund node and must NOT create a parallel :Company node."""
+    refresh = Neo4jSink._COMPANY_REFRESH_FUND_CYPHER
+    merge = Neo4jSink._COMPANY_MERGE_NON_FUND_CYPHER
+    assert "MATCH (f:InvestmentFund {gmr_id: row.gmr_id})" in refresh
+    assert "WHERE NOT EXISTS" in merge
+    assert "InvestmentFund {gmr_id: row.gmr_id}" in merge
+    assert "MERGE (n:Company {gmr_id: row.gmr_id})" in merge

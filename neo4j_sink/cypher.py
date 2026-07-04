@@ -44,6 +44,23 @@ def render_upsert_company(p: dict) -> CypherWrite:
     )
 
 
+def render_upsert_investment_fund(p: dict) -> CypherWrite:
+    """Pooled investment vehicle. Shares the Company gmr_id namespace
+    (same UUID5 derivation) — the sink's merge layer relabels an
+    existing :Company node in place rather than creating a sibling,
+    so the entity keeps its identity and every edge."""
+    return CypherWrite(
+        label="InvestmentFund",
+        primary_key={"gmr_id": p["gmr_id"]},
+        set_props={
+            k: p[k] for k in (
+                "name", "country", "lei", "active",
+                "legal_form", "fund_type",
+            ) if p.get(k) is not None
+        },
+    )
+
+
 def render_upsert_sanctioned_entity(p: dict) -> CypherWrite:
     set_props = {
         "eu_reference": p["eu_reference"],
@@ -112,6 +129,7 @@ def render_upsert_listing(p: dict) -> CypherWrite:
     set_props = {
         k: p[k] for k in (
             "exchange", "currency", "active", "isin", "mic",
+            "security_type",
         ) if p.get(k) is not None
     }
     return CypherWrite(
@@ -383,6 +401,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
     "UpsertCompany": render_upsert_company,
+    "UpsertInvestmentFund": render_upsert_investment_fund,
     "UpsertListing": render_upsert_listing,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
