@@ -5,6 +5,7 @@
 # underscore prefix on the helper marks it sink-internal vs API;
 # pylint's blanket no-touch policy is the wrong default here.
 from neo4j_sink.cypher import (
+    CypherWrite,
     render_upsert_investment_fund,
     RENDERERS, label_for_graph,
     render_assert_same_as, render_upsert_authority,
@@ -555,3 +556,56 @@ def test_company_merge_never_resplits_a_fund():
     assert "WHERE NOT EXISTS" in merge
     assert "InvestmentFund {gmr_id: row.gmr_id}" in merge
     assert "MERGE (n:Company {gmr_id: row.gmr_id})" in merge
+
+
+# ── Value quarantine (contract monetary fields withheld) ──────────
+
+
+def test_contract_quarantine_clears_monetary_props():
+    w = render_upsert_contract({
+        "ted_notice_id": "n-1",
+        "title": "Bus depot",
+        "value_eur": 1.8e14,             # must NOT survive
+        "estimated_value_eur": 2.0e14,
+        "value_quarantined": True,
+        "value_quarantine_reason": "implausible_magnitude",
+    })
+    assert "value_eur" not in w.set_props
+    assert "estimated_value_eur" not in w.set_props
+    assert w.set_props["value_quarantined"] is True
+    assert w.set_props["value_quarantine_reason"] == "implausible_magnitude"
+    assert "value_eur" in w.clear_props
+    assert "estimated_value_eur" in w.clear_props
+    assert w.set_props["title"] == "Bus depot"    # non-monetary untouched
+
+
+def test_contract_zero_value_quarantine_keeps_estimate():
+    w = render_upsert_contract({
+        "ted_notice_id": "n-2",
+        "value_eur": 0.0,
+        "estimated_value_eur": 5.0e6,    # a published 0 doesn't taint this
+        "value_quarantined": True,
+        "value_quarantine_reason": "zero_value",
+    })
+    assert "value_eur" not in w.set_props
+    assert w.set_props["estimated_value_eur"] == 5.0e6
+    assert w.clear_props == ["value_eur", "value_original", "value_currency"]
+
+
+def test_contract_without_quarantine_has_no_clears():
+    w = render_upsert_contract({"ted_notice_id": "n-3", "value_eur": 5.0})
+    assert w.clear_props is None
+    assert w.set_props["value_eur"] == 5.0
+
+
+def test_collapse_respects_set_then_clear_order():
+    a = CypherWrite("Contract", {"ted_notice_id": "n"}, {"value_eur": 5.0})
+    b = CypherWrite("Contract", {"ted_notice_id": "n"}, {},
+                    clear_props=["value_eur"])
+    merged = Neo4jSink._collapse_node_writes([a, b])
+    assert merged[0].clear_props == ["value_eur"]
+    assert "value_eur" not in merged[0].set_props
+    # ...and the reverse: a later corrective SET revives the field
+    merged2 = Neo4jSink._collapse_node_writes([b, a])
+    assert not merged2[0].clear_props
+    assert merged2[0].set_props["value_eur"] == 5.0

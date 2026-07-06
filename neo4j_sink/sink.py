@@ -27,6 +27,20 @@ from .cypher import RENDERERS, CypherWrite, label_for_graph
 logger = logging.getLogger(__name__)
 
 
+def _merge_clears(cur, w) -> None:
+    """Sequential-apply equivalence for clears: a later SET revives a
+    field an earlier event cleared, and a later clear removes a field
+    an earlier event set."""
+    if cur.clear_props:
+        cur.clear_props = [f for f in cur.clear_props
+                           if f not in w.set_props]
+    if w.clear_props:
+        cur.clear_props = sorted(
+            set(cur.clear_props or []) | set(w.clear_props))
+        for f in w.clear_props:
+            cur.set_props.pop(f, None)
+
+
 class Neo4jSink(EventConsumer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -280,10 +294,12 @@ class Neo4jSink(EventConsumer):
                     set_props=dict(w.set_props),
                     extra_relationships=list(w.extra_relationships or []),
                     extra_labels=list(w.extra_labels or []),
+                    clear_props=list(w.clear_props or []) or None,
                 )
                 order.append(key)
                 continue
             cur.set_props.update(w.set_props)
+            _merge_clears(cur, w)
             if w.extra_labels:
                 cur.extra_labels = sorted(
                     set(cur.extra_labels) | set(w.extra_labels))
@@ -300,10 +316,12 @@ class Neo4jSink(EventConsumer):
         for w in merged:
             gkey = (w.label,
                     tuple(sorted(w.primary_key.keys())),
-                    tuple(w.extra_labels or []))
+                    tuple(w.extra_labels or []),
+                    tuple(w.clear_props or []))
             groups[gkey].append(w)
-        for (label, keyset, extra_labels), ws in groups.items():
-            self._unwind_merge_nodes(label, keyset, list(extra_labels), ws)
+        for (label, keyset, extra_labels, clear_props), ws in groups.items():
+            self._unwind_merge_nodes(label, keyset, list(extra_labels), ws,
+                                     clear_props=list(clear_props))
         rel_items: list = []
         for w in merged:
             for rel_type, target_iri, props in (w.extra_relationships or []):
@@ -311,7 +329,9 @@ class Neo4jSink(EventConsumer):
                     (w.label, w.primary_key, rel_type, target_iri, props))
         return rel_items
 
-    def _unwind_merge_nodes(self, label, keyset, extra_labels, writes) -> None:
+    def _unwind_merge_nodes(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, label, keyset, extra_labels, writes, clear_props=None,
+    ) -> None:
         key_match = ", ".join(f"{k}: row.{k}" for k in keyset)
         rows = []
         for w in writes:
@@ -335,10 +355,17 @@ class Neo4jSink(EventConsumer):
                     rows=rows,
                 )
             return
+        clear_clause = ""
+        if clear_props:
+            # SET += never deletes; quarantined values rendered before
+            # the quarantine event must be removed explicitly.
+            clear_clause = " REMOVE " + ", ".join(
+                f"n.{f}" for f in clear_props)
         cypher = (
             f"UNWIND $rows AS row "
             f"MERGE (n:{label} {{ {key_match} }}) "
             f"SET n += row.props"
+            f"{clear_clause}"
         )
         if label in ("Company", "Authority"):
             # Materialise name_clean for the resolver range index, but
@@ -451,6 +478,8 @@ class Neo4jSink(EventConsumer):
         cypher = (
             f"MERGE (n:{w.label} {{ {key_match} }}) "
             + (f"SET {set_clause}" if set_clause else "")
+            + ((" REMOVE " + ", ".join(f"n.{f}" for f in w.clear_props))
+               if w.clear_props else "")
             + self._label_set_clause(w.extra_labels)
         )
         with self._driver.session() as session:

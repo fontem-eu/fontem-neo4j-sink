@@ -27,8 +27,12 @@ class CypherWrite:
     label: str                  # 'Company', 'SanctionedEntity', 'Filing', …
     primary_key: dict           # {'gmr_id': '…'} or {'entity_id': '…'}
     set_props: dict             # the rest of the entity body
-    extra_relationships: list[tuple[str, str, dict]] = None  # rel_type, target_iri, props
+    extra_relationships: "list[tuple[str, str, dict]] | None" = None  # rel_type, target_iri, props
     extra_labels: list[str] | None = None  # secondary labels, e.g. ['Lobbyist']
+    # Properties to REMOVE from the node. Needed because SET n += props
+    # never deletes: a quarantined contract value that was rendered
+    # before the quarantine event must be explicitly cleared.
+    clear_props: list[str] | None = None
 
 
 def render_upsert_company(p: dict) -> CypherWrite:
@@ -160,6 +164,20 @@ def render_upsert_authority(p: dict) -> CypherWrite:
     )
 
 
+# Monetary props withheld when a contract value is quarantined. The
+# reason decides the blast radius: a published 0 (zero_value) poisons
+# only the awarded-value fields — the estimate may be real — while the
+# hard-review reasons make every monetary signal suspect.
+_QUARANTINE_CLEARS: dict[str, tuple[str, ...]] = {
+    "zero_value": ("value_eur", "value_original", "value_currency"),
+}
+_QUARANTINE_CLEARS_DEFAULT: tuple[str, ...] = (
+    "value_eur", "value_original", "value_currency",
+    "estimated_value_eur", "value_payable_eur",
+    "value_before_eur", "value_before_original",
+)
+
+
 def render_upsert_contract(p: dict) -> CypherWrite:
     """Contract keyed by ted_notice_id. Two extra_relationships:
     Authority-[:AWARDED]->Contract (from_target), and
@@ -187,6 +205,7 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             "value_confidence", "value_confidence_consistency",
             "value_confidence_plausibility", "value_quality_flag",
             "value_low_confidence", "value_payable_discrepancy",
+            "value_quarantined", "value_quarantine_reason",
             # Tender-integrity fields (eForms) — inputs to the SMSB
             # single-bidder / non-open indicators + the DIGIWHIST CRI
             # red flags.
@@ -218,11 +237,21 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             f"http://data.fontem.eu/id/Company/{cid}",
             {"_direction": "from_source"},
         ))
+    clear: list[str] | None = None
+    if p.get("value_quarantined"):
+        reason = p.get("value_quarantine_reason") or ""
+        clear = list(_QUARANTINE_CLEARS.get(reason,
+                                            _QUARANTINE_CLEARS_DEFAULT))
+        # A quarantine event must not smuggle the very values it
+        # withholds back in through set_props.
+        for k in clear:
+            set_props.pop(k, None)
     return CypherWrite(
         label="Contract",
         primary_key={"ted_notice_id": p["ted_notice_id"]},
         set_props=set_props,
         extra_relationships=extras or None,
+        clear_props=clear,
     )
 
 
