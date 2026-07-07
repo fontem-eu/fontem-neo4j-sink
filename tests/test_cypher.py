@@ -4,6 +4,7 @@
 # private-helper coverage that lives next to the symbol. The
 # underscore prefix on the helper marks it sink-internal vs API;
 # pylint's blanket no-touch policy is the wrong default here.
+from unittest.mock import MagicMock
 from neo4j_sink.cypher import (
     CypherWrite,
     render_upsert_investment_fund,
@@ -113,6 +114,32 @@ def test_contract_links_authority_and_company():
     assert ("AWARDED_TO",
             "http://data.fontem.eu/id/Company/abc",
             {"_direction": "from_source"}) in rels
+
+
+def test_contract_match_provenance_rides_the_awarded_to_edge():
+    """match_tier/confidence/layer land on the AWARDED_TO edge (so exact
+    vs name-based attributions are queryable per-edge), never on the
+    Contract node."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS123-456789",
+        "company_gmr_id": "abc",
+        "match_tier": "name_country",
+        "match_confidence": 0.95,
+        "match_layer": 2,
+    })
+    awarded_to = [r for r in (w.extra_relationships or [])
+                  if r[0] == "AWARDED_TO"]
+    assert len(awarded_to) == 1
+    _, target, props = awarded_to[0]
+    assert target == "http://data.fontem.eu/id/Company/abc"
+    assert props == {
+        "_direction": "from_source",
+        "match_tier": "name_country",
+        "match_confidence": 0.95,
+        "match_layer": 2,
+    }
+    for k in ("match_tier", "match_confidence", "match_layer"):
+        assert k not in w.set_props
 
 
 def test_contract_omits_relationships_when_keys_missing():
@@ -609,3 +636,65 @@ def test_collapse_respects_set_then_clear_order():
     merged2 = Neo4jSink._collapse_node_writes([b, a])
     assert not merged2[0].clear_props
     assert merged2[0].set_props["value_eur"] == 5.0
+
+
+# ── GLEIF identity block + entity_kind-driven relabel ─────────────
+
+
+def test_render_company_carries_gleif_identity_block():
+    w = render_upsert_company({
+        "gmr_id": "g1", "name": "CARLSBERG A/S",
+        "entity_kind": "GENERAL", "registered_as": "61056416",
+        "registered_at": "RA000170", "jurisdiction": "DK",
+        "aliases": ["Carlsberg Group"], "hq_city": "København V",
+    })
+    for k in ("entity_kind", "registered_as", "registered_at",
+              "jurisdiction", "hq_city"):
+        assert w.set_props[k] is not None, k
+    assert w.set_props["aliases"] == ["Carlsberg Group"]
+
+
+def test_merge_company_partitions_by_entity_kind():
+    """The Company merge routes rows by GLEIF entity_kind: FUND relabels
+    to fund, non-FUND reverts to company, absent leaves the label."""
+    sink = Neo4jSink.__new__(Neo4jSink)
+    sess = MagicMock()
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=sess)
+    ctx.__exit__ = MagicMock(return_value=False)
+    sink._driver = MagicMock()
+    sink._driver.session = MagicMock(return_value=ctx)
+
+    rows = [
+        {"gmr_id": "f1", "props": {"name": "A Fund", "entity_kind": "FUND"}},
+        {"gmr_id": "c1", "props": {"name": "Ostrum AM", "entity_kind": "GENERAL"}},
+        {"gmr_id": "e1", "props": {"name": "Edgar Co"}},  # no kind stated
+    ]
+    sink._merge_company_rows(rows, extra_labels=[])
+    cyphers = [c.args[0] for c in sess.run.call_args_list]
+    fund_c = [c for c in cyphers if "SET x:InvestmentFund REMOVE x:Company" in c]
+    revert_c = [c for c in cyphers if "SET x:Company REMOVE x:InvestmentFund" in c]
+    assert len(fund_c) == 1 and len(revert_c) == 1
+    # the FUND row went to the fund cypher, the GENERAL row to revert
+    fund_rows = next(c.kwargs["rows"] for c in sess.run.call_args_list
+                     if "REMOVE x:Company" in c.args[0])
+    assert [r["gmr_id"] for r in fund_rows] == ["f1"]
+    revert_rows = next(c.kwargs["rows"] for c in sess.run.call_args_list
+                       if "REMOVE x:InvestmentFund" in c.args[0])
+    assert [r["gmr_id"] for r in revert_rows] == ["c1"]
+
+
+def test_merge_company_unknown_kind_does_not_relabel():
+    """A row with no entity_kind (EDGAR/TED) must never move an existing
+    label — it uses the refresh-both path."""
+    sink = Neo4jSink.__new__(Neo4jSink)
+    sess = MagicMock()
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=sess)
+    ctx.__exit__ = MagicMock(return_value=False)
+    sink._driver = MagicMock()
+    sink._driver.session = MagicMock(return_value=ctx)
+    sink._merge_company_rows([{"gmr_id": "e1", "props": {"name": "X"}}], [])
+    cyphers = " ".join(c.args[0] for c in sess.run.call_args_list)
+    assert "REMOVE x:Company" not in cyphers
+    assert "REMOVE x:InvestmentFund" not in cyphers

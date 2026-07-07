@@ -141,18 +141,20 @@ class Neo4jSink(EventConsumer):
             return next(iter(writes))
         return None
 
-    # ── InvestmentFund relabel semantics ──────────────────────────
+    # ── Entity kind (:Company vs :InvestmentFund) ─────────────────
     #
-    # Funds share the Company gmr_id namespace (same UUID5 derivation)
-    # and usually FIRST enter the graph as :Company (GLEIF/EDGAR load
-    # everything with an LEI). UpsertInvestmentFund therefore means
-    # "this entity IS a fund": relabel any existing :Company node in
-    # place — keeping the node, its properties and every edge — and
-    # only then MERGE, so the identity never splits into two nodes.
-    # The reverse never happens implicitly: a later UpsertCompany for
-    # a relabeled fund refreshes the node's properties but does NOT
-    # relabel it back — OpenFIGI instrument evidence outranks the
-    # kind-agnostic GLEIF/EDGAR company refresh.
+    # GLEIF's entity.category is the ONLY authority for the label. It
+    # arrives on UpsertCompany as `entity_kind`; the node relabels in
+    # place (keeping props + every edge, one identity) both ways:
+    #   entity_kind == "FUND"        -> :InvestmentFund
+    #   entity_kind present, != FUND -> :Company (reverts a prior FUND)
+    #   entity_kind absent           -> label unchanged (EDGAR/other
+    #                                   loaders don't assert kind; only
+    #                                   GLEIF does — silence, not a guess)
+    # UpsertInvestmentFund events still render (old log entries), but no
+    # loader emits new ones — the openfigi instrument->entity guess was
+    # deleted. The former "UpsertCompany never relabels back" rule is
+    # gone: GLEIF category is authoritative, so GENERAL reverts a fund.
     _IFUND_MERGE_CYPHER = (
         "UNWIND $rows AS row "
         "OPTIONAL MATCH (c:Company {gmr_id: row.gmr_id}) "
@@ -171,6 +173,18 @@ class Neo4jSink(EventConsumer):
         "UNWIND $rows AS row "
         "WITH row WHERE NOT EXISTS { "
         "MATCH (:InvestmentFund {gmr_id: row.gmr_id}) } "
+        "MERGE (n:Company {gmr_id: row.gmr_id}) "
+        "SET n += row.props"
+    )
+    # entity_kind present and != FUND: relabel any InvestmentFund node
+    # back to :Company in place (reverts an earlier fund labelling once
+    # GLEIF states GENERAL), then merge as :Company.
+    _COMPANY_REVERT_CYPHER = (
+        "UNWIND $rows AS row "
+        "OPTIONAL MATCH (f:InvestmentFund {gmr_id: row.gmr_id}) "
+        "FOREACH (x IN CASE WHEN f IS NULL THEN [] ELSE [f] END | "
+        "SET x:Company REMOVE x:InvestmentFund) "
+        "WITH row "
         "MERGE (n:Company {gmr_id: row.gmr_id}) "
         "SET n += row.props"
     )
@@ -343,17 +357,7 @@ class Neo4jSink(EventConsumer):
                 session.run(self._IFUND_MERGE_CYPHER, rows=rows)
             return
         if label == "Company":
-            clean = (
-                " SET n.name_clean = CASE WHEN row.props.name IS NOT NULL "
-                "THEN apoc.text.clean(row.props.name) ELSE n.name_clean END"
-            )
-            with self._driver.session() as session:
-                session.run(self._COMPANY_REFRESH_FUND_CYPHER, rows=rows)
-                session.run(
-                    self._COMPANY_MERGE_NON_FUND_CYPHER + clean
-                    + self._label_set_clause(extra_labels),
-                    rows=rows,
-                )
+            self._merge_company_rows(rows, extra_labels)
             return
         clear_clause = ""
         if clear_props:
@@ -378,6 +382,43 @@ class Neo4jSink(EventConsumer):
         cypher += self._label_set_clause(extra_labels)
         with self._driver.session() as session:
             session.run(cypher, rows=rows)
+
+    def _merge_company_rows(self, rows, extra_labels) -> None:
+        """Merge UpsertCompany rows, partitioned by the GLEIF-stated
+        entity_kind so the node lands under the correct label:
+          FUND        -> relabel-to-fund (_IFUND_MERGE_CYPHER)
+          non-FUND    -> relabel-to-company revert (_COMPANY_REVERT)
+          unknown     -> label untouched (refresh both shapes)
+        Only GLEIF sets entity_kind, so most rows (EDGAR, TED, etc.)
+        fall in the 'unknown' bucket and never move an existing label."""
+        funds, reverts, unknown = [], [], []
+        for row in rows:
+            kind = (row["props"] or {}).get("entity_kind")
+            if kind == "FUND":
+                funds.append(row)
+            elif kind is not None:
+                reverts.append(row)
+            else:
+                unknown.append(row)
+        clean = (
+            " SET n.name_clean = CASE WHEN row.props.name IS NOT NULL "
+            "THEN apoc.text.clean(row.props.name) ELSE n.name_clean END"
+        )
+        labels = self._label_set_clause(extra_labels)
+        with self._driver.session() as session:
+            if funds:
+                session.run(self._IFUND_MERGE_CYPHER + clean + labels,
+                            rows=funds)
+            if reverts:
+                session.run(self._COMPANY_REVERT_CYPHER + clean + labels,
+                            rows=reverts)
+            if unknown:
+                # label-agnostic refresh: update whichever shape exists,
+                # create as :Company only if neither does.
+                session.run(self._COMPANY_REFRESH_FUND_CYPHER, rows=unknown)
+                session.run(
+                    self._COMPANY_MERGE_NON_FUND_CYPHER + clean + labels,
+                    rows=unknown)
 
     def _flush_extra_relationships(  # pylint: disable=too-many-locals
         self, rel_items: list,

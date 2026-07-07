@@ -43,6 +43,13 @@ def render_upsert_company(p: dict) -> CypherWrite:
             k: p[k] for k in (
                 "name", "country", "lei", "vat", "cik",
                 "active", "legal_form", "postal_code",
+                # GLEIF identity block (verbatim; entity_kind drives the
+                # :Company/:InvestmentFund label in the sink merge).
+                "entity_kind", "registered_as", "registered_at",
+                "jurisdiction", "registration_status",
+                "entity_creation_date", "address", "city", "region",
+                "hq_address", "hq_city", "hq_region", "hq_country",
+                "hq_postal_code", "aliases",
             ) if p.get(k) is not None
         },
     )
@@ -232,10 +239,19 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             {"_direction": "from_target"},
         ))
     if cid := p.get("company_gmr_id"):
+        # Match provenance rides on the edge, not the Contract node: it
+        # describes how THIS award was attributed to THIS company, so
+        # exact (lei/vat/cik) and name-based (name_country/fuzzy) edges
+        # are distinguishable in queries + the UI. Absent on legacy
+        # events, so only set what is present.
+        edge_props = {"_direction": "from_source"}
+        for mk in ("match_tier", "match_confidence", "match_layer"):
+            if p.get(mk) is not None:
+                edge_props[mk] = p[mk]
         extras.append((
             "AWARDED_TO",
             f"http://data.fontem.eu/id/Company/{cid}",
-            {"_direction": "from_source"},
+            edge_props,
         ))
     clear: list[str] | None = None
     if p.get("value_quarantined"):
