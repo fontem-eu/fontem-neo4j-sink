@@ -162,19 +162,19 @@ class Neo4jSink(EventConsumer):
         "SET x:InvestmentFund REMOVE x:Company) "
         "WITH row "
         "MERGE (n:InvestmentFund {gmr_id: row.gmr_id}) "
-        "SET n += row.props"
+        "SET n += row.props REMOVE n._stub"
     )
     _COMPANY_REFRESH_FUND_CYPHER = (
         "UNWIND $rows AS row "
         "MATCH (f:InvestmentFund {gmr_id: row.gmr_id}) "
-        "SET f += row.props"
+        "SET f += row.props REMOVE f._stub"
     )
     _COMPANY_MERGE_NON_FUND_CYPHER = (
         "UNWIND $rows AS row "
         "WITH row WHERE NOT EXISTS { "
         "MATCH (:InvestmentFund {gmr_id: row.gmr_id}) } "
         "MERGE (n:Company {gmr_id: row.gmr_id}) "
-        "SET n += row.props"
+        "SET n += row.props REMOVE n._stub"
     )
     # entity_kind present and != FUND: relabel any InvestmentFund node
     # back to :Company in place (reverts an earlier fund labelling once
@@ -186,8 +186,32 @@ class Neo4jSink(EventConsumer):
         "SET x:Company REMOVE x:InvestmentFund) "
         "WITH row "
         "MERGE (n:Company {gmr_id: row.gmr_id}) "
-        "SET n += row.props"
+        "SET n += row.props REMOVE n._stub"
     )
+
+    # Labels whose _key_field is not a full key on its own — a stub
+    # MERGEd on that single field could alias distinct rows. Edges to
+    # these keep the old MATCH-only behaviour.
+    _STUB_UNSAFE_LABELS = frozenset({"ExchangeRate"})
+
+    @classmethod
+    def _stub_fragment(cls, var: str, label: str, field: str,
+                       row_ref: str) -> str:
+        """Cypher fragment: create a {_stub: true} placeholder when the
+        endpoint doesn't exist yet, so a source-stated edge is never
+        silently dropped (#269). The OPTIONAL MATCH uses the label
+        disjunction (a relabeled :InvestmentFund must count as present —
+        MERGEing :Company blindly would recreate the dual-label bug);
+        the stub itself gets the IRI's base label, and the GLEIF
+        entity_kind relabel corrects it later if needed. The entity's
+        own upsert clears the flag (SET ... REMOVE n._stub)."""
+        return (
+            f"OPTIONAL MATCH ({var}0:{cls._match_label(label)} "
+            f"{{ {field}: {row_ref} }}) "
+            f"FOREACH (_ IN CASE WHEN {var}0 IS NULL THEN [1] ELSE [] END | "
+            f"MERGE ({var}s:{label} {{ {field}: {row_ref} }}) "
+            f"SET {var}s._stub = true) "
+        )
 
     @staticmethod
     def _match_label(label: str) -> str:
@@ -255,7 +279,8 @@ class Neo4jSink(EventConsumer):
         cypher = (
             f"UNWIND $rows AS row "
             f"MERGE (n:{label} {{ {key_match} }}) "
-            f"SET {set_clause}"
+            f"SET {set_clause} "
+            f"REMOVE n._stub"
             + self._label_set_clause(sorted(common_labels))
         )
         with self._driver.session() as session:
@@ -445,9 +470,16 @@ class Neo4jSink(EventConsumer):
                 arrow = f"(t)-[r:{rel_type}]->(s)"
             else:
                 arrow = f"(s)-[r:{rel_type}]->(t)"
+            # The source is the event's own node (MERGEd earlier in
+            # this same batch); only the target can be missing.
+            stub = ("" if tgt_label in self._STUB_UNSAFE_LABELS
+                    else self._stub_fragment(
+                        "t", tgt_label, tgt_field, "row.tgt_key")
+                    + "WITH s, row ")
             cypher = (
                 f"UNWIND $rows AS row "
                 f"MATCH (s:{src_label} {{ {src_match} }}) "
+                + stub +
                 f"MATCH (t:{self._match_label(tgt_label)} "
                 f"{{ {tgt_field}: row.tgt_key }}) "
                 f"MERGE {arrow} "
@@ -476,8 +508,17 @@ class Neo4jSink(EventConsumer):
         for (a_label, b_label, rel_type), items in groups.items():
             a_field = self._key_field(a_label)
             b_field = self._key_field(b_label)
+            # Neither endpoint is guaranteed to exist (both are
+            # foreign to the event) — stub whichever is missing.
+            stub_a = ("" if a_label in self._STUB_UNSAFE_LABELS
+                      else self._stub_fragment("a", a_label, a_field, "row.ak")
+                      + "WITH row ")
+            stub_b = ("" if b_label in self._STUB_UNSAFE_LABELS
+                      else self._stub_fragment("b", b_label, b_field, "row.bk")
+                      + "WITH row ")
             cypher = (
-                f"UNWIND $rows AS row "
+                "UNWIND $rows AS row "
+                + stub_a + stub_b +
                 f"MATCH (a:{self._match_label(a_label)} {{ {a_field}: row.ak }}) "
                 f"MATCH (b:{self._match_label(b_label)} {{ {b_field}: row.bk }}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
@@ -530,6 +571,12 @@ class Neo4jSink(EventConsumer):
                                      rel_type, target_iri, props)
 
     def _apply_same_as(self, w: CypherWrite) -> None:
+        # Deliberately MATCH-only (no stub creation): SAME_AS is a
+        # DERIVED proposal the consolidator computed from entities it
+        # read out of this graph — if an endpoint has since vanished,
+        # the proposal is void and dropping it is correct. Stubs are
+        # for source-STATED facts (awards, filings, ownership), which
+        # must never be lost to ingest-order timing.
         # IRIs are http://data.fontem.eu/id/<Label>/<key>. Parse
         # them into label + key for the MATCH.
         a_label, a_key = self._iri_to_label_key(w.primary_key["a_iri"])
@@ -566,11 +613,19 @@ class Neo4jSink(EventConsumer):
         rel_type = self._predicate_to_rel_type(w.primary_key["predicate"])
         a_field = self._key_field(a_label)
         b_field = self._key_field(b_label)
+        stub_a = ("" if a_label in self._STUB_UNSAFE_LABELS
+                  else self._stub_fragment("a", a_label, a_field, "$ak")
+                  + "WITH 1 AS _a ")
+        stub_b = ("" if b_label in self._STUB_UNSAFE_LABELS
+                  else self._stub_fragment("b", b_label, b_field, "$bk")
+                  + "WITH 1 AS _b ")
         with self._driver.session() as session:
             session.run(
-                f"MATCH (a:{self._match_label(a_label)}), "
-                f"(b:{self._match_label(b_label)}) "
-                f"WHERE a.{a_field} = $ak AND b.{b_field} = $bk "
+                stub_a + stub_b +
+                f"MATCH (a:{self._match_label(a_label)} "
+                f"{{ {a_field}: $ak }}) "
+                f"MATCH (b:{self._match_label(b_label)} "
+                f"{{ {b_field}: $bk }}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
                 f"SET r += $props",
                 ak=a_key, bk=b_key, props=w.set_props,
@@ -617,20 +672,23 @@ class Neo4jSink(EventConsumer):
         direction = props.pop("_direction", "from_source")
         src_match = ", ".join(f"{k}: ${k}" for k in src_key.keys())
         tgt_field = self._key_field(tgt_label)
-        if direction == "from_target":
-            cypher = (
-                f"MATCH (s:{src_label} {{ {src_match} }}) "
-                f"MATCH (t:{tgt_label} {{ {tgt_field}: $tgt_key }}) "
-                f"MERGE (t)-[r:{rel_type}]->(s) "
-                f"SET r += $props"
-            )
-        else:
-            cypher = (
-                f"MATCH (s:{src_label} {{ {src_match} }}) "
-                f"MATCH (t:{tgt_label} {{ {tgt_field}: $tgt_key }}) "
-                f"MERGE (s)-[r:{rel_type}]->(t) "
-                f"SET r += $props"
-            )
+        # Stub a missing target + match via the label disjunction (this
+        # path previously used the bare label, so fund-relabeled targets
+        # were silently missed here too).
+        stub = ("" if tgt_label in self._STUB_UNSAFE_LABELS
+                else self._stub_fragment(
+                    "t", tgt_label, tgt_field, "$tgt_key")
+                + "WITH 1 AS _t ")
+        arrow = (f"(t)-[r:{rel_type}]->(s)" if direction == "from_target"
+                 else f"(s)-[r:{rel_type}]->(t)")
+        cypher = (
+            stub +
+            f"MATCH (s:{src_label} {{ {src_match} }}) "
+            f"MATCH (t:{self._match_label(tgt_label)} "
+            f"{{ {tgt_field}: $tgt_key }}) "
+            f"MERGE {arrow} "
+            f"SET r += $props"
+        )
         with self._driver.session() as session:
             session.run(cypher, **src_key, tgt_key=tgt_key, props=props)
 

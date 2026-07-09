@@ -413,9 +413,8 @@ def test_directional_edges_keep_orientation_when_batched():
     from_source (Contract->Company). Batching must preserve both."""
     sink, calls = _make_sink_with_mock_driver()
     sink.handle([_contract("d-2026", seq=1)])
-    rel_calls = {c[0].split("MERGE ", 1)[1].split(" ", 1)[0]: c
-                 for c in calls if "-[r:" in c[0]}
-    awarded = [q for q in rel_calls if "[r:AWARDED]" in q]
-    awarded_to = [q for q in rel_calls if "[r:AWARDED_TO]" in q]
-    assert awarded and "(t)-[r:AWARDED]->(s)" in awarded[0]
-    assert awarded_to and "(s)-[r:AWARDED_TO]->(t)" in awarded_to[0]
+    rel_queries = [c[0] for c in calls if "-[r:" in c[0]]
+    awarded = [q for q in rel_queries if "[r:AWARDED]" in q]
+    awarded_to = [q for q in rel_queries if "[r:AWARDED_TO]" in q]
+    assert awarded and "MERGE (t)-[r:AWARDED]->(s)" in awarded[0]
+    assert awarded_to and "MERGE (s)-[r:AWARDED_TO]->(t)" in awarded_to[0]
