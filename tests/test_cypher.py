@@ -13,7 +13,8 @@ from neo4j_sink.cypher import (
     render_upsert_company, render_upsert_contract,
     render_upsert_disclosure, render_upsert_exchange_rate,
     render_upsert_filing, render_upsert_listing,
-    render_upsert_relationship, render_upsert_sanctioned_entity,
+    render_upsert_petition, render_upsert_relationship,
+    render_upsert_sanctioned_entity,
     render_upsert_taxonomy_code,
 )
 from neo4j_sink.sink import Neo4jSink
@@ -394,7 +395,7 @@ def test_renderer_registry_covers_all_event_types():
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
         "UpsertCompany", "UpsertInvestmentFund", "UpsertListing",
-        "UpsertSanctionedEntity", "UpsertFiling",
+        "UpsertPetition", "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
@@ -705,3 +706,19 @@ def test_merge_company_unknown_kind_does_not_relabel():
     cyphers = " ".join(c.args[0] for c in sess.run.call_args_list)
     assert "REMOVE x:Company" not in cyphers
     assert "REMOVE x:InvestmentFund" not in cyphers
+
+
+def test_petition_round_trip():
+    w = render_upsert_petition({
+        "system": "eu-eci", "petition_id": "ECI(2024)000007",
+        "title": "Stop Destroying Videogames", "status": "ANSWERED",
+        "total_supporters": 1294188,
+        "organizer_names": ["Daniel ONDRUSKA"],
+        "organizer_roles": ["REPRESENTATIVE"],
+        "registration_decision_celex": "32024D1824",
+        "answer_refs": ["C(2026)4110"],
+    })
+    assert w.label == "Petition"
+    assert w.primary_key == {"system": "eu-eci", "petition_id": "ECI(2024)000007"}
+    assert w.set_props["total_supporters"] == 1294188
+    assert "collection_deadline" not in w.set_props
