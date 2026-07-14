@@ -722,3 +722,40 @@ def test_petition_round_trip():
     assert w.primary_key == {"system": "eu-eci", "petition_id": "ECI(2024)000007"}
     assert w.set_props["total_supporters"] == 1294188
     assert "collection_deadline" not in w.set_props
+
+
+def test_contract_rollup_partial_sets_only_collapse_fields():
+    """A collapse_modifications rollup-only UpsertContract must set
+    current_value / is_current / contract_key and NOT recompute integrity
+    red flags (which would reset them to defaults on the live node)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS111-000001",
+        "current_value": 42.0,
+        "is_current": False,
+        "contract_key": "proc:P-1",
+    })
+    assert w.set_props["current_value"] == 42.0
+    assert w.set_props["is_current"] is False
+    assert w.set_props["contract_key"] == "proc:P-1"
+    # no red-flag / value / title fields smuggled in by the rollup
+    leaked = [k for k in w.set_props
+              if k.startswith("is_") and k != "is_current"]
+    assert not leaked, f"red flags leaked into rollup: {leaked}"
+    assert "value_eur" not in w.set_props
+    assert "title" not in w.set_props
+
+
+def test_contract_full_emit_carries_current_value():
+    """A full contract emit that includes the collapse fields renders them
+    alongside everything else (go-forward ingest path)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS111-000002",
+        "title": "Bridge works",
+        "value_eur": 100.0,
+        "is_current": True,
+        "current_value": 90.0,
+        "contract_key": "proc:P-2",
+    })
+    assert w.set_props["current_value"] == 90.0
+    assert w.set_props["is_current"] is True
+    assert w.set_props["value_eur"] == 100.0

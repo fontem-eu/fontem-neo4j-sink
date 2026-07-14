@@ -187,6 +187,12 @@ _QUARANTINE_CLEARS_DEFAULT: tuple[str, ...] = (
 )
 
 
+# Keys a collapse_modifications rollup-only UpsertContract carries. When an
+# incoming payload is a subset of these, it is a partial value-rollup update
+# (not a full contract emit), so integrity red flags must NOT be recomputed.
+_ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
+
+
 def render_upsert_contract(p: dict) -> CypherWrite:
     """Contract keyed by ted_notice_id. Two extra_relationships:
     Authority-[:AWARDED]->Contract (from_target), and
@@ -226,13 +232,25 @@ def render_upsert_contract(p: dict) -> CypherWrite:
             # join key the MODIFIES linking pass uses; notice_type marks
             # can-modif contracts.
             "procedure_id", "notice_type", "modifies_publication_number",
+            # Modification-collapse rollup (collapse_modifications ETL pass):
+            # current_value = latest restated value for the contract,
+            # is_current marks the single canonical node per contract that
+            # value aggregations sum over, contract_key is the identity it
+            # grouped on. Emitted as partial (rollup-only) UpsertContract
+            # updates; SET n += props leaves the rest of the node intact.
+            "current_value", "is_current", "contract_key",
         ) if p.get(k) is not None
     }
     # Materialise the shared integrity red flags (single-bidder, non-open,
     # no-call, price-only + CRI-lite count) so they are hot-queryable in
     # the graph rather than recomputed per query. One source of truth
     # (fontem_event_schemas.integrity), shared with the Virtuoso sink + API.
-    set_props.update(contract_red_flags(p))
+    # A rollup-only partial (collapse_modifications) carries just the
+    # canonical/current_value fields; recomputing red flags off it would
+    # reset every integrity flag to its default. Only (re)derive flags from
+    # a real contract emit that carries the integrity inputs.
+    if not set(p).issubset(_ROLLUP_ONLY_KEYS):
+        set_props.update(contract_red_flags(p))
     extras: list[tuple[str, str, dict]] = []
     if aid := p.get("authority_id"):
         extras.append((
