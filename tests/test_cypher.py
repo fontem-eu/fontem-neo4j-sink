@@ -35,6 +35,13 @@ def test_sanction_keyed_by_entity_id():
     })
     assert w.label == "SanctionedEntity"
     assert w.primary_key == {"entity_id": "x"}
+    # absent subject_type (pre-2026-07-14 events) sets no property
+    assert "subject_type" not in w.set_props
+
+    person = render_upsert_sanctioned_entity({
+        "entity_id": "p", "eu_reference": "EU.2", "subject_type": "person",
+    })
+    assert person.set_props["subject_type"] == "person"
 
 
 def test_filing_extra_relationship_to_company():
