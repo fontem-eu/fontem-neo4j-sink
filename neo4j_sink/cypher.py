@@ -444,12 +444,35 @@ def render_assert_same_as(p: dict) -> CypherWrite:
     )
 
 
+def render_upsert_petition(p: dict) -> CypherWrite:
+    """Public petition keyed by (system, petition_id) — e.g. the EU
+    Citizens' Initiative register. Organizer names arrive as parallel
+    arrays (names/roles/countries); emails never reach the platform."""
+    set_props = {
+        k: p[k] for k in (
+            "title", "status", "objectives", "registration_date",
+            "collection_start_date", "collection_deadline", "closed_date",
+            "submitted_date", "answered_date", "total_supporters",
+            "support_link", "organizer_names", "organizer_roles",
+            "organizer_countries", "funding_total_eur",
+            "funding_sponsor_count", "registration_decision_celex",
+            "answer_refs", "latest_update",
+        ) if p.get(k) is not None
+    }
+    return CypherWrite(
+        label="Petition",
+        primary_key={"system": p["system"], "petition_id": p["petition_id"]},
+        set_props=set_props,
+    )
+
+
 RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
     "UpsertCompany": render_upsert_company,
     "UpsertInvestmentFund": render_upsert_investment_fund,
     "UpsertListing": render_upsert_listing,
+    "UpsertPetition": render_upsert_petition,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
