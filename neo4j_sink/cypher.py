@@ -82,6 +82,8 @@ def render_upsert_sanctioned_entity(p: dict) -> CypherWrite:
         "sanction_regime": p.get("sanction_regime"),
         "legal_basis": p.get("legal_basis"),
         "listing_reason": p.get("listing_reason"),
+        # person|entity; absent on pre-2026-07-14 events (all entities then)
+        "subject_type": p.get("subject_type"),
     }
     return CypherWrite(
         label="SanctionedEntity",
