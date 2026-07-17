@@ -22,7 +22,10 @@ from fontem_event_schemas.integrity import contract_red_flags
 
 
 @dataclass
-class CypherWrite:
+class CypherWrite:  # pylint: disable=too-many-instance-attributes
+    # A write is a value bag by design; the guard/always pair is
+    # what lets the sink express the Contract entity's high-water
+    # semantics without a second write type.
     """One MERGE/SET statement worth of parameters."""
     label: str                  # 'Company', 'SanctionedEntity', 'Filing', …
     primary_key: dict           # {'gmr_id': '…'} or {'entity_id': '…'}
@@ -33,6 +36,19 @@ class CypherWrite:
     # never deletes: a quarantined contract value that was rendered
     # before the quarantine event must be explicitly cleared.
     clear_props: list[str] | None = None
+    # High-water-mark guard: when set, `set_props` may only be applied
+    # when row.props.<guard_prop> >= the node's current <guard_prop>
+    # (string comparison; ISO dates order correctly). The sink renders
+    # a FOREACH-CASE conditional SET instead of a blind `SET n +=`, so
+    # replay from seq 0 and out-of-order delivery converge on the same
+    # state (the latest notice wins). Guarded writes are never
+    # dict-collapsed in a batch — each row applies sequentially with
+    # the guard, which IS the sequential per-event semantics.
+    guard_prop: str | None = None
+    # Props applied unconditionally even on a guarded write (e.g. the
+    # award_value stamped by an award notice must survive a later
+    # modification having already raised the high-water mark).
+    always_props: dict | None = None
 
 
 def render_upsert_company(p: dict) -> CypherWrite:
@@ -193,7 +209,207 @@ _QUARANTINE_CLEARS_DEFAULT: tuple[str, ...] = (
 _ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
 
 
-def render_upsert_contract(p: dict) -> CypherWrite:
+def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
+    """Contract events render in one of three shapes:
+
+    1. **Legacy (no contract_key)** — pre-Contract/Notice-model events.
+       Notice-grain :Contract keyed by ted_notice_id, byte-identical to
+       the historical renderer. The event log is append-only and
+       replayable from seq 0, so this shape is frozen forever.
+    2. **Rollup partial** (payload keys are a subset of
+       _ROLLUP_ONLY_KEYS) — a collapse_modifications value-rollup.
+       Although it now carries contract_key, its ted_notice_id is a
+       real notice identity and every such event in the log was emitted
+       against a notice-grain graph. It keeps the legacy render (and
+       therefore never creates a :Notice node nor a Contract entity):
+       on replay it lands on the legacy :Contract notice node exactly
+       as it always did, and the pass is inert against a converted
+       graph (no :Contract{notice_type:'can-modif'} rows remain).
+    3. **Native Contract/Notice model** (contract_key present + real
+       notice fields) — one :Notice node (per-notice provenance), one
+       :Contract entity (display fields, high-water-guarded), a
+       NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON edges attached
+       to the Contract entity. This is the shape project_contracts used
+       to build in batch; the sink now writes it natively.
+    """
+    if p.get("contract_key") is None or set(p).issubset(_ROLLUP_ONLY_KEYS):
+        return _render_contract_notice_grain(p)
+    return [_render_notice(p), _render_contract_entity(p)]
+
+
+def _notice_kind(p: dict) -> str:
+    """award|modification. Producer-stamped when present; otherwise
+    derived exactly like project_contracts' relabel phase (eForms
+    can-modif => modification)."""
+    kind = p.get("notice_kind")
+    if kind is not None:
+        return kind
+    return "modification" if p.get("notice_type") == "can-modif" else "award"
+
+
+# Per-notice fields (the legacy Contract prop tuple minus the collapse
+# rollup fields, which are per-contract in the new model but stay
+# renderable on the Notice for rollup replays).
+_NOTICE_FIELDS: tuple[str, ...] = (
+    "title", "publication_date", "value_eur",
+    "value_currency", "value_original",
+    "value_before_eur", "value_before_original",
+    "cpv", "nuts", "language", "country",
+    "ted_publication_number",
+    "estimated_value_eur", "value_payable_eur",
+    "value_confidence", "value_confidence_consistency",
+    "value_confidence_plausibility", "value_quality_flag",
+    "value_low_confidence", "value_payable_discrepancy",
+    "value_quarantined", "value_quarantine_reason",
+    "procedure_type", "tenders_received",
+    "award_criterion_type", "submission_deadline",
+    "is_framework", "eu_funded", "funding_programme",
+    "procedure_id", "notice_type", "modifies_publication_number",
+)
+
+# Fields NOT denormalised onto the Contract entity: notice identity
+# and modification linkage stay per-notice (project_contracts nulls
+# them on the entity for the same reason).
+_NOTICE_ONLY_FIELDS = frozenset({
+    "notice_type", "modifies_publication_number",
+})
+
+# Edge props carried per parties[] item onto AWARDED_TO / BID_ON.
+_PARTY_EDGE_PROPS: tuple[str, ...] = (
+    "rank", "is_consortium_member", "tendering_party_id",
+    "match_tier", "match_confidence", "match_layer",
+)
+
+
+def _quarantine_clears(p: dict) -> "list[str] | None":
+    if not p.get("value_quarantined"):
+        return None
+    reason = p.get("value_quarantine_reason") or ""
+    return list(_QUARANTINE_CLEARS.get(reason, _QUARANTINE_CLEARS_DEFAULT))
+
+
+def _render_notice(p: dict) -> CypherWrite:
+    """The per-notice provenance node. Carries everything the notice
+    published (incl. the recomputed integrity red flags — their inputs
+    are per-notice) plus notice_kind + contract_key, and the NOTICE_OF
+    edge to its Contract entity. The Contract-entity target IRI uses
+    the ContractEntity segment: the plain Contract segment must keep
+    resolving by ted_notice_id forever (link_ted_modifications MODIFIES
+    events in the log reference notices that way)."""
+    set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
+    set_props["notice_kind"] = _notice_kind(p)
+    set_props["contract_key"] = p["contract_key"]
+    set_props.update(contract_red_flags(p))
+    clear = _quarantine_clears(p)
+    if clear:
+        for k in clear:
+            set_props.pop(k, None)
+    return CypherWrite(
+        label="Notice",
+        primary_key={"ted_notice_id": p["ted_notice_id"]},
+        set_props=set_props,
+        extra_relationships=[(
+            "NOTICE_OF",
+            f"http://data.fontem.eu/id/ContractEntity/{p['contract_key']}",
+            {"_direction": "from_source"},
+        )],
+        clear_props=clear,
+    )
+
+
+def _contract_entity_edges(p: dict) -> "list[tuple[str, str, dict]]":
+    """AWARDED / AWARDED_TO from the legacy top-level keys, plus the
+    parties[] fan-out: winners get AWARDED_TO (Contract->Company) with
+    the party props on the edge; named tenderers (losing bidders named
+    on the notice) get BID_ON (Company->Contract). The primary winner
+    usually appears both as company_gmr_id and as a parties[] winner —
+    same rel type + endpoints, so the MERGEs coalesce onto one edge."""
+    extras: list[tuple[str, str, dict]] = []
+    if aid := p.get("authority_id"):
+        extras.append((
+            "AWARDED",
+            f"http://data.fontem.eu/id/Authority/{aid}",
+            {"_direction": "from_target"},
+        ))
+    if cid := p.get("company_gmr_id"):
+        edge_props = {"_direction": "from_source"}
+        for mk in ("match_tier", "match_confidence", "match_layer"):
+            if p.get(mk) is not None:
+                edge_props[mk] = p[mk]
+        extras.append((
+            "AWARDED_TO",
+            f"http://data.fontem.eu/id/Company/{cid}",
+            edge_props,
+        ))
+    for party in p.get("parties") or []:
+        is_winner = party.get("role") == "winner"
+        props = {"_direction": "from_source" if is_winner else "from_target"}
+        for k in _PARTY_EDGE_PROPS:
+            if party.get(k) is not None:
+                props[k] = party[k]
+        extras.append((
+            "AWARDED_TO" if is_winner else "BID_ON",
+            f"http://data.fontem.eu/id/Company/{party['company_gmr_id']}",
+            props,
+        ))
+    return extras
+
+
+def _render_contract_entity(p: dict) -> CypherWrite:
+    """The one-per-real-contract display entity, keyed by contract_key.
+
+    Display fields are guarded by the canonical_publication_date
+    high-water mark: only the latest notice (by publication_date) may
+    restate current_value / value_eur and the denormalised display
+    fields, so a late-delivered older notice can never regress the
+    entity, and replay from seq 0 converges to the same state.
+    notice_count is NOT set here — it increments only when a NOTICE_OF
+    edge is created (sink-side ON CREATE), never on replay.
+
+    Quarantine clears are folded into the guarded props as explicit
+    nulls (`SET n += map` removes null-valued keys), so a quarantine
+    only strips the entity's monetary fields when the quarantined
+    notice actually is the canonical one."""
+    guarded = {
+        k: p[k] for k in _NOTICE_FIELDS
+        if k not in _NOTICE_ONLY_FIELDS and p.get(k) is not None
+    }
+    # Canonical-notice identity, denormalised for the read surfaces
+    # (TED links etc.) exactly like project_contracts' finalize.
+    guarded["ted_notice_id"] = p["ted_notice_id"]
+    guarded.update(contract_red_flags(p))
+    if pub := p.get("publication_date"):
+        guarded["canonical_publication_date"] = pub
+    clear = _quarantine_clears(p)
+    value = None if clear else p.get("value_eur")
+    if clear:
+        for k in clear:
+            guarded.pop(k, None)
+        # Guarded nulls: SET += removes them, but only when this
+        # notice wins the high-water comparison.
+        guarded.update({k: None for k in clear})
+        if "value_eur" in clear:
+            guarded["current_value"] = None
+    elif value is not None or p.get("current_value") is not None:
+        current = p.get("current_value", value)
+        if current is None:
+            current = value
+        guarded["current_value"] = current
+        guarded["value_eur"] = current
+    always: dict = {"is_current": True}
+    if _notice_kind(p) == "award" and value is not None:
+        always["award_value"] = value
+    return CypherWrite(
+        label="Contract",
+        primary_key={"contract_key": p["contract_key"]},
+        set_props=guarded,
+        extra_relationships=_contract_entity_edges(p) or None,
+        guard_prop="canonical_publication_date",
+        always_props=always,
+    )
+
+
+def _render_contract_notice_grain(p: dict) -> CypherWrite:
     """Contract keyed by ted_notice_id. Two extra_relationships:
     Authority-[:AWARDED]->Contract (from_target), and
     Contract-[:AWARDED_TO]->Company (from_source). Either side
