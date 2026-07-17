@@ -27,3 +27,12 @@ or a sibling clone at build time.
 6. Coordinate the deploy with `fontem-virtuoso-sink`, `fontem-consolidator`,
    and `fontem-api` — they all read/write the same `events.entity_events`
    table and must agree on the schema.
+
+## History note (fontem-event-schemas 0.1.0 -> 0.2.0)
+
+fontem-event-schemas #24 bumped the package to 0.2.0 without touching
+the sinks' pins; both sinks' CI installs the schemas repo at main and
+then `pip install -e .` against a `==0.1.0` pin, so the resolver broke
+and #25 reverted the bump. The 0.2.0 re-bump (Contract/Notice model)
+moves the wheel, `pyproject.toml`, and `requirements.txt` in the same
+commit — keep all three in lockstep on every future bump.

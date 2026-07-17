@@ -745,10 +745,13 @@ def test_contract_rollup_partial_sets_only_collapse_fields():
     assert "title" not in w.set_props
 
 
-def test_contract_full_emit_carries_current_value():
-    """A full contract emit that includes the collapse fields renders them
-    alongside everything else (go-forward ingest path)."""
-    w = render_upsert_contract({
+def test_contract_full_emit_splits_into_notice_and_contract():
+    """A full contract emit that carries contract_key takes the native
+    Contract/Notice split: one :Notice write (per-notice provenance)
+    plus one :Contract entity write keyed by contract_key, whose
+    value_eur is aliased to the collapsed current_value (the figure
+    every legacy `ct.value_eur` aggregate must see exactly once)."""
+    writes = render_upsert_contract({
         "ted_notice_id": "2025-OJS111-000002",
         "title": "Bridge works",
         "value_eur": 100.0,
@@ -756,6 +759,12 @@ def test_contract_full_emit_carries_current_value():
         "current_value": 90.0,
         "contract_key": "proc:P-2",
     })
-    assert w.set_props["current_value"] == 90.0
-    assert w.set_props["is_current"] is True
-    assert w.set_props["value_eur"] == 100.0
+    assert isinstance(writes, list) and len(writes) == 2
+    notice, contract = writes
+    assert notice.label == "Notice"
+    assert notice.primary_key == {"ted_notice_id": "2025-OJS111-000002"}
+    assert notice.set_props["value_eur"] == 100.0
+    assert contract.label == "Contract"
+    assert contract.primary_key == {"contract_key": "proc:P-2"}
+    assert contract.set_props["current_value"] == 90.0
+    assert contract.set_props["value_eur"] == 90.0

@@ -1,5 +1,5 @@
 fontem-events==0.3.0
-fontem-event-schemas==0.1.0
+fontem-event-schemas==0.2.0
 neo4j>=5.20
 psycopg[binary]>=3.1
 prometheus-client>=0.21

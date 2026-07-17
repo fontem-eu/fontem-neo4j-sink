@@ -110,23 +110,32 @@ class Neo4jSink(EventConsumer):
                 # poison the drain.
                 logger.debug("ignoring delete op for %s", ev.iri)
                 continue
-            write = renderer(ev.payload)
-            if write is None:
+            rendered = renderer(ev.payload)
+            if rendered is None:
                 continue
+            # A renderer may return several writes for one event (the
+            # Contract/Notice split); each routes by its own label.
+            writes = rendered if isinstance(rendered, list) else [rendered]
+            self._route_writes(writes, bracket_writes, bracket_label, pending)
 
-            # Find an open bracket whose label matches this event.
-            target = self._find_open_bracket(
+        if pending:
+            self._apply_batch(pending)
+
+    # ── implementation ────────────────────────────────────
+
+    @classmethod
+    def _route_writes(cls, writes, bracket_writes, bracket_label,
+                      pending) -> None:
+        """Route each write into the open bracket whose label matches
+        it, or into the non-bracketed pending batch."""
+        for write in writes:
+            target = cls._find_open_bracket(
                 bracket_writes, bracket_label, write.label,
             )
             if target is not None:
                 bracket_writes[target].append(write)
             else:
                 pending.append(write)
-
-        if pending:
-            self._apply_batch(pending)
-
-    # ── implementation ────────────────────────────────────
 
     @staticmethod
     def _find_open_bracket(
@@ -209,17 +218,45 @@ class Neo4jSink(EventConsumer):
             f"OPTIONAL MATCH ({var}0:{cls._match_label(label)} "
             f"{{ {field}: {row_ref} }}) "
             f"FOREACH (_ IN CASE WHEN {var}0 IS NULL THEN [1] ELSE [] END | "
-            f"MERGE ({var}s:{label} {{ {field}: {row_ref} }}) "
+            f"MERGE ({var}s:{cls._node_label(label)} "
+            f"{{ {field}: {row_ref} }}) "
             f"SET {var}s._stub = true) "
         )
 
-    @staticmethod
-    def _match_label(label: str) -> str:
+    # IRI segment → Neo4j node label, where they differ. The plain
+    # Contract IRI segment must keep resolving to the notice-grain key
+    # (ted_notice_id) forever — link_ted_modifications MODIFIES events
+    # in the append-only log reference notices as id/Contract/<uuid>.
+    # The Contract *entity* of the Contract/Notice model therefore gets
+    # its own IRI segment (ContractEntity, keyed by contract_key) that
+    # lands on the :Contract label.
+    _NODE_LABEL_BY_IRI = {"ContractEntity": "Contract"}
+
+    @classmethod
+    def _node_label(cls, label: str) -> str:
+        return cls._NODE_LABEL_BY_IRI.get(label, label)
+
+    @classmethod
+    def _match_label(cls, label: str) -> str:
         """Label expression for MATCHing an entity by graph identity.
         Corporate gmr_ids can live under :Company or :InvestmentFund
         (relabeled funds keep their gmr_id), so Company-IRI targets
         must match either label or fund edges silently vanish."""
+        label = cls._node_label(label)
         return "Company|InvestmentFund" if label == "Company" else label
+
+    @staticmethod
+    def _rel_on_create(rel_type: str, direction: str) -> str:
+        """ON CREATE side-effects per relationship type. NOTICE_OF
+        increments the Contract entity's notice_count exactly when the
+        edge is first created: offset commit is not transactional with
+        the write, so a redelivered batch re-MERGEs the same edge and
+        must not inflate the count."""
+        if rel_type != "NOTICE_OF":
+            return ""
+        contract_var = "s" if direction == "from_target" else "t"
+        return (f"ON CREATE SET {contract_var}.notice_count = "
+                f"coalesce({contract_var}.notice_count, 0) + 1 ")
 
     @staticmethod
     def _name_clean_fragment(label: str, has_name: bool) -> str:
@@ -323,8 +360,14 @@ class Neo4jSink(EventConsumer):
         a sequential per-event apply would give."""
         collapsed: dict = {}
         order: list = []
-        for w in nodes:
+        for i, w in enumerate(nodes):
             key = (w.label, tuple(sorted(w.primary_key.items())))
+            if w.guard_prop:
+                # High-water-guarded writes must apply row-by-row: the
+                # in-Cypher guard (not dict merging) decides which
+                # notice's props stick, so two same-key writes in one
+                # batch stay separate UNWIND rows in arrival order.
+                key = (*key, i)
             cur = collapsed.get(key)
             if cur is None:
                 collapsed[key] = CypherWrite(
@@ -334,6 +377,8 @@ class Neo4jSink(EventConsumer):
                     extra_relationships=list(w.extra_relationships or []),
                     extra_labels=list(w.extra_labels or []),
                     clear_props=list(w.clear_props or []) or None,
+                    guard_prop=w.guard_prop,
+                    always_props=dict(w.always_props or {}) or None,
                 )
                 order.append(key)
                 continue
@@ -351,16 +396,7 @@ class Neo4jSink(EventConsumer):
         extra-labels), collapsing same-key writes first. Returns the
         flattened extra-relationship items to flush next."""
         merged = self._collapse_node_writes(nodes)
-        groups: dict = defaultdict(list)
-        for w in merged:
-            gkey = (w.label,
-                    tuple(sorted(w.primary_key.keys())),
-                    tuple(w.extra_labels or []),
-                    tuple(w.clear_props or []))
-            groups[gkey].append(w)
-        for (label, keyset, extra_labels, clear_props), ws in groups.items():
-            self._unwind_merge_nodes(label, keyset, list(extra_labels), ws,
-                                     clear_props=list(clear_props))
+        self._flush_node_groups(merged)
         rel_items: list = []
         for w in merged:
             for rel_type, target_iri, props in (w.extra_relationships or []):
@@ -368,14 +404,34 @@ class Neo4jSink(EventConsumer):
                     (w.label, w.primary_key, rel_type, target_iri, props))
         return rel_items
 
-    def _unwind_merge_nodes(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _flush_node_groups(self, merged: list[CypherWrite]) -> None:
+        """One UNWIND-MERGE per (label, key-shape, extra-labels,
+        clear-set, guard) bucket."""
+        groups: dict = defaultdict(list)
+        for w in merged:
+            gkey = (w.label,
+                    tuple(sorted(w.primary_key.keys())),
+                    tuple(w.extra_labels or []),
+                    tuple(w.clear_props or []),
+                    w.guard_prop)
+            groups[gkey].append(w)
+        for (label, keyset, extra_labels, clear_props,
+             guard_prop), ws in groups.items():
+            self._unwind_merge_nodes(label, keyset, list(extra_labels), ws,
+                                     clear_props=list(clear_props),
+                                     guard_prop=guard_prop)
+
+    def _unwind_merge_nodes(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self, label, keyset, extra_labels, writes, clear_props=None,
+        guard_prop=None,
     ) -> None:
         key_match = ", ".join(f"{k}: row.{k}" for k in keyset)
         rows = []
         for w in writes:
             row = {k: w.primary_key[k] for k in keyset}
             row["props"] = w.set_props
+            if guard_prop:
+                row["always"] = w.always_props or {}
             rows.append(row)
         if label == "InvestmentFund":
             with self._driver.session() as session:
@@ -383,6 +439,9 @@ class Neo4jSink(EventConsumer):
             return
         if label == "Company":
             self._merge_company_rows(rows, extra_labels)
+            return
+        if guard_prop:
+            self._unwind_merge_guarded(label, key_match, rows, guard_prop)
             return
         clear_clause = ""
         if clear_props:
@@ -395,6 +454,11 @@ class Neo4jSink(EventConsumer):
             f"MERGE (n:{label} {{ {key_match} }}) "
             f"SET n += row.props"
             f"{clear_clause}"
+            # The bracket path always cleared the stub flag; this path
+            # never did, so a Contract/Notice minted as a {_stub: true}
+            # placeholder by an edge kept the flag after its real event
+            # arrived. Clear it here too.
+            f" REMOVE n._stub"
         )
         if label in ("Company", "Authority"):
             # Materialise name_clean for the resolver range index, but
@@ -405,6 +469,28 @@ class Neo4jSink(EventConsumer):
                 "THEN apoc.text.clean(row.props.name) ELSE n.name_clean END"
             )
         cypher += self._label_set_clause(extra_labels)
+        with self._driver.session() as session:
+            session.run(cypher, rows=rows)
+
+    def _unwind_merge_guarded(self, label, key_match, rows,
+                              guard_prop) -> None:
+        """High-water-mark write: `always` props apply unconditionally,
+        the display props only when this row's guard value is >= the
+        node's (string compare; ISO dates order correctly; absent
+        compares as ''). FOREACH-CASE is the conditional-SET idiom —
+        MERGE row-by-row keeps sequential semantics inside one UNWIND,
+        so replay and out-of-order delivery converge on the latest
+        notice."""
+        cypher = (
+            f"UNWIND $rows AS row "
+            f"MERGE (n:{label} {{ {key_match} }}) "
+            f"SET n += row.always "
+            f"FOREACH (_ IN CASE WHEN "
+            f"coalesce(row.props.{guard_prop}, '') >= "
+            f"coalesce(n.{guard_prop}, '') THEN [1] ELSE [] END | "
+            f"SET n += row.props) "
+            f"REMOVE n._stub"
+        )
         with self._driver.session() as session:
             session.run(cypher, rows=rows)
 
@@ -483,7 +569,8 @@ class Neo4jSink(EventConsumer):
                 f"MATCH (t:{self._match_label(tgt_label)} "
                 f"{{ {tgt_field}: row.tgt_key }}) "
                 f"MERGE {arrow} "
-                f"SET r += row.props"
+                + self._rel_on_create(rel_type, direction)
+                + "SET r += row.props"
             )
             rows = [{**src_key, "tgt_key": tgt_key, "props": p}
                     for src_key, tgt_key, p in items]
@@ -687,7 +774,8 @@ class Neo4jSink(EventConsumer):
             f"MATCH (t:{self._match_label(tgt_label)} "
             f"{{ {tgt_field}: $tgt_key }}) "
             f"MERGE {arrow} "
-            f"SET r += $props"
+            + self._rel_on_create(rel_type, direction)
+            + "SET r += $props"
         )
         with self._driver.session() as session:
             session.run(cypher, **src_key, tgt_key=tgt_key, props=props)
@@ -705,7 +793,15 @@ class Neo4jSink(EventConsumer):
         "Filing": "filing_iri",
         "Listing": "ticker",
         "Authority": "authority_id",
+        # Legacy IRI segment: notices were :Contract nodes keyed by
+        # ted_notice_id; old MODIFIES / quarantine events resolve
+        # through this forever.
         "Contract": "ted_notice_id",
+        # Contract/Notice model: the entity IRI segment (label
+        # :Contract via _NODE_LABEL_BY_IRI) keys by contract_key; the
+        # :Notice node keeps the notice key.
+        "ContractEntity": "contract_key",
+        "Notice": "ted_notice_id",
         "Cpv": "code",
         "Nuts": "code",
         "Programme": "code",
