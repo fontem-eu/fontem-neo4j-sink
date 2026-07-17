@@ -358,3 +358,13 @@ def test_unwind_merge_clears_stub_on_real_arrival():
     sink.handle([_contract_event(_new_model_payload())])
     node_calls = [q for q, _ in calls if "MERGE (n:" in q]
     assert node_calls and all("REMOVE n._stub" in q for q in node_calls)
+
+
+def test_explicit_null_current_value_falls_back_to_value_eur():
+    """Producers may serialise current_value: null on a full emit; the
+    entity's collapsed figure then falls back to the notice value."""
+    _, contract = render_upsert_contract(_new_model_payload(
+        current_value=None,
+    ))
+    assert contract.set_props["current_value"] == 1000.0
+    assert contract.set_props["value_eur"] == 1000.0

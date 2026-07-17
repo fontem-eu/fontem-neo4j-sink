@@ -341,18 +341,24 @@ def _contract_entity_edges(p: dict) -> "list[tuple[str, str, dict]]":
             f"http://data.fontem.eu/id/Company/{cid}",
             edge_props,
         ))
-    for party in p.get("parties") or []:
-        is_winner = party.get("role") == "winner"
-        props = {"_direction": "from_source" if is_winner else "from_target"}
-        for k in _PARTY_EDGE_PROPS:
-            if party.get(k) is not None:
-                props[k] = party[k]
-        extras.append((
-            "AWARDED_TO" if is_winner else "BID_ON",
-            f"http://data.fontem.eu/id/Company/{party['company_gmr_id']}",
-            props,
-        ))
+    extras.extend(_party_edge(party) for party in p.get("parties") or [])
     return extras
+
+
+def _party_edge(party: dict) -> "tuple[str, str, dict]":
+    """One parties[] item -> its edge triple. Winners point outward
+    (Contract->Company AWARDED_TO); named tenderers point inward
+    (Company->Contract BID_ON)."""
+    is_winner = party.get("role") == "winner"
+    props = {"_direction": "from_source" if is_winner else "from_target"}
+    for k in _PARTY_EDGE_PROPS:
+        if party.get(k) is not None:
+            props[k] = party[k]
+    return (
+        "AWARDED_TO" if is_winner else "BID_ON",
+        f"http://data.fontem.eu/id/Company/{party['company_gmr_id']}",
+        props,
+    )
 
 
 def _render_contract_entity(p: dict) -> CypherWrite:
@@ -387,7 +393,7 @@ def _render_contract_entity(p: dict) -> CypherWrite:
             guarded.pop(k, None)
         # Guarded nulls: SET += removes them, but only when this
         # notice wins the high-water comparison.
-        guarded.update({k: None for k in clear})
+        guarded.update(dict.fromkeys(clear))
         if "value_eur" in clear:
             guarded["current_value"] = None
     elif value is not None or p.get("current_value") is not None:
