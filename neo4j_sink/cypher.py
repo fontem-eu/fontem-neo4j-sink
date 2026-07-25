@@ -189,6 +189,33 @@ def render_upsert_authority(p: dict) -> CypherWrite:
     )
 
 
+def render_translate_authority_name(p: dict) -> "CypherWrite | None":
+    """Multilingual name enrichment for an existing :Authority node.
+
+    The translations land as ``name_<lang>`` props (e.g. name_de,
+    name_fr) alongside ``name_lang`` (the source language) and
+    ``multilingual_updated_at``. The sink applies these via
+    ``SET n += props`` — additive, so it neither clobbers the
+    authority's other props nor is clobbered by a later
+    UpsertAuthority (which only sets `name`, never `name_<lang>`).
+    Mirrors the old direct-write ETL's
+    ``SET a += row.props, a.name_lang=…, a.multilingual_updated_at=…``.
+    """
+    translations = p.get("translations") or {}
+    if not translations:
+        return None
+    set_props = {f"name_{lang}": val for lang, val in translations.items() if val}
+    if p.get("source_lang"):
+        set_props["name_lang"] = p["source_lang"]
+    if p.get("translated_at"):
+        set_props["multilingual_updated_at"] = p["translated_at"]
+    return CypherWrite(
+        label="Authority",
+        primary_key={"authority_id": p["authority_id"]},
+        set_props=set_props,
+    )
+
+
 # Monetary props withheld when a contract value is quarantined. The
 # reason decides the blast radius: a published 0 (zero_value) poisons
 # only the awarded-value fields — the estimate may be real — while the
@@ -716,6 +743,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
+    "TranslateAuthorityName": render_translate_authority_name,
     "UpsertContract": render_upsert_contract,
     "UpsertTaxonomyCode": render_upsert_taxonomy_code,
     "UpsertRelationship": render_upsert_relationship,

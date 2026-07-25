@@ -16,6 +16,7 @@ from neo4j_sink.cypher import (
     render_upsert_petition, render_upsert_relationship,
     render_upsert_sanctioned_entity,
     render_upsert_taxonomy_code,
+    render_translate_authority_name,
 )
 from neo4j_sink.sink import Neo4jSink
 
@@ -101,6 +102,35 @@ def test_authority_basic():
     assert w.label == "Authority"
     assert w.primary_key == {"authority_id": "auth-1"}
     assert w.set_props["authority_type"] == "regulator"
+
+
+def test_translate_authority_name_basic():
+    w = render_translate_authority_name({
+        "authority_id": "auth-1",
+        "name": "Urząd Miasta",
+        "source_lang": "pl",
+        "translations": {"de": "Stadtamt", "fr": "Mairie"},
+        "method": "mistral-medium",
+        "translated_at": "2026-07-25T12:00:00Z",
+    })
+    assert w is not None
+    assert w.label == "Authority"
+    assert w.primary_key == {"authority_id": "auth-1"}
+    assert w.set_props["name_de"] == "Stadtamt"
+    assert w.set_props["name_fr"] == "Mairie"
+    assert w.set_props["name_lang"] == "pl"
+    assert w.set_props["multilingual_updated_at"] == "2026-07-25T12:00:00Z"
+    # Additive only: the canonical `name` must not be written here.
+    assert "name" not in w.set_props
+
+
+def test_translate_authority_name_empty_translations_is_none():
+    assert render_translate_authority_name({
+        "authority_id": "auth-1", "translations": {},
+    }) is None
+    assert render_translate_authority_name({
+        "authority_id": "auth-1",
+    }) is None
 
 
 def test_contract_links_authority_and_company():
@@ -396,7 +426,7 @@ def test_renderer_registry_covers_all_event_types():
         "BeginGraphReplace", "EndGraphReplace",
         "UpsertCompany", "UpsertInvestmentFund", "UpsertListing",
         "UpsertPetition", "UpsertSanctionedEntity", "UpsertFiling",
-        "UpsertAuthority", "UpsertContract",
+        "UpsertAuthority", "TranslateAuthorityName", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
         "AssertSameAs",
