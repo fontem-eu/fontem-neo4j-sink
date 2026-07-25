@@ -36,3 +36,14 @@ then `pip install -e .` against a `==0.1.0` pin, so the resolver broke
 and #25 reverted the bump. The 0.2.0 re-bump (Contract/Notice model)
 moves the wheel, `pyproject.toml`, and `requirements.txt` in the same
 commit — keep all three in lockstep on every future bump.
+
+## History note (fontem-event-schemas 0.2.0 -> 0.4.0)
+
+Schemas 0.3.0 (Contract parties + value_scale_corrected) and 0.4.0
+(TranslateAuthorityName) shipped while the sinks were still pinned at
+0.2.0, so CI (which installs schemas@main, now 0.4.0, before
+`pip install -e .`) broke on the exact-pin conflict again. Bumped the
+wheel + both pins to 0.4.0 in lockstep. The sink code reads payloads
+dict-directly and never calls validate()/load_schema(), so the bump is
+a CI/build-consistency change, not a functional dependency — but the
+exact pin must always track schemas@main to keep CI resolvable.
