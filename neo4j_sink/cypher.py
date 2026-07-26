@@ -229,6 +229,33 @@ _QUARANTINE_CLEARS_DEFAULT: tuple[str, ...] = (
     "value_before_eur", "value_before_original",
 )
 
+# The awarded-value props a `no_awarded_value` emit withholds. The loader
+# blanks value_eur/value_original locally (a stray, often sign-flipped
+# figure), but SET n += props never DELETES, so an award value rendered by
+# an earlier emit survives unless we clear it explicitly.
+_NO_AWARDED_VALUE_CLEARS: tuple[str, ...] = (
+    "value_eur", "value_original", "value_currency",
+)
+
+# The quarantine marker itself. A non-quarantined re-emit must strip a
+# marker an earlier quarantine / backfill event left behind, or the node
+# reads as quarantined forever while carrying a healthy value
+# (values.quarantined_carries_no_value).
+_QUARANTINE_MARKER: tuple[str, ...] = (
+    "value_quarantined", "value_quarantine_reason",
+)
+
+# Value-quality flags that WITHHOLD or taint the value (the loader
+# quarantines these). If one arrives *un*-quarantined — e.g. a scale
+# re-score (correct_scale_errors) that dropped the marker — the sink must
+# NOT wipe the quarantine marker: that would let a hard-flagged value
+# render un-quarantined (values.hard_flags_are_quarantined). Leave the
+# marker decision to the loader/backfill in that case.
+_HARD_VALUE_FLAGS: frozenset[str] = frozenset({
+    "zero_value", "concession_negative",
+    "unverified_single_signal", "implausible_magnitude",
+})
+
 
 # Keys a collapse_modifications rollup-only UpsertContract carries. When an
 # incoming payload is a subset of these, it is a partial value-rollup update
@@ -308,11 +335,54 @@ _PARTY_EDGE_PROPS: tuple[str, ...] = (
 )
 
 
-def _quarantine_clears(p: dict) -> "list[str] | None":
-    if not p.get("value_quarantined"):
+def _value_clears(p: dict) -> "list[str] | None":
+    """Value-quality props to REMOVE from the node for this emit.
+
+    SET n += props never deletes, so any value prop a *later* emit no
+    longer stands behind must be cleared explicitly:
+
+    * quarantine  → the withheld monetary fields (per reason);
+    * no_awarded_value → the awarded value (a prior, often sign-flipped
+      figure the loader has since blanked);
+    * a healthy re-score (benign flag, not quarantined) → the stale
+      quarantine marker a prior quarantine/backfill event left behind.
+
+    Returns None when the emit carries no value-quality signal at all
+    (rollup partial / flag-less legacy event): such an emit is NOT
+    authoritative about value state, so it clears nothing.
+    """
+    if p.get("value_quarantined"):
+        reason = p.get("value_quarantine_reason") or ""
+        return list(_QUARANTINE_CLEARS.get(reason, _QUARANTINE_CLEARS_DEFAULT))
+    flag = p.get("value_quality_flag")
+    if flag is None:
         return None
-    reason = p.get("value_quarantine_reason") or ""
-    return list(_QUARANTINE_CLEARS.get(reason, _QUARANTINE_CLEARS_DEFAULT))
+    if flag == "no_awarded_value":
+        return list(_NO_AWARDED_VALUE_CLEARS) + list(_QUARANTINE_MARKER)
+    if flag in _HARD_VALUE_FLAGS:
+        # Hard flag but un-quarantined: don't touch the marker (see
+        # _HARD_VALUE_FLAGS).
+        return None
+    return list(_QUARANTINE_MARKER)
+
+
+def _contract_clears(p: dict) -> "list[str] | None":
+    """All props to REMOVE for this contract emit: the value-quality
+    clears plus a corrupt non-positive tenders_received (a bidder COUNT
+    is >= 1; 0/negative is broken parsing and must not linger —
+    values.contract_bidder_count_positive)."""
+    clears = list(_value_clears(p) or [])
+    tenders = p.get("tenders_received")
+    if (tenders is not None and tenders <= 0
+            and "tenders_received" not in clears):
+        clears.append("tenders_received")
+    return clears or None
+
+
+def _value_withheld(clears: "list[str] | None") -> bool:
+    """True when this emit clears the awarded value itself (quarantine or
+    no_awarded_value) — as opposed to only stripping a stale marker."""
+    return bool(clears) and "value_eur" in clears
 
 
 def _render_notice(p: dict) -> CypherWrite:
@@ -327,7 +397,7 @@ def _render_notice(p: dict) -> CypherWrite:
     set_props["notice_kind"] = _notice_kind(p)
     set_props["contract_key"] = p["contract_key"]
     set_props.update(contract_red_flags(p))
-    clear = _quarantine_clears(p)
+    clear = _contract_clears(p)
     if clear:
         for k in clear:
             set_props.pop(k, None)
@@ -413,17 +483,19 @@ def _render_contract_entity(p: dict) -> CypherWrite:
     guarded.update(contract_red_flags(p))
     if pub := p.get("publication_date"):
         guarded["canonical_publication_date"] = pub
-    clear = _quarantine_clears(p)
-    value = None if clear else p.get("value_eur")
+    clear = _contract_clears(p)
+    withheld = _value_withheld(clear)
+    value = None if withheld else p.get("value_eur")
     if clear:
         for k in clear:
             guarded.pop(k, None)
         # Guarded nulls: SET += removes them, but only when this
         # notice wins the high-water comparison.
         guarded.update(dict.fromkeys(clear))
-        if "value_eur" in clear:
+        if withheld:
             guarded["current_value"] = None
-    elif value is not None or p.get("current_value") is not None:
+    if not withheld and (value is not None
+                         or p.get("current_value") is not None):
         current = p.get("current_value", value)
         if current is None:
             current = value
@@ -522,13 +594,14 @@ def _render_contract_notice_grain(p: dict) -> CypherWrite:
             f"http://data.fontem.eu/id/Company/{cid}",
             edge_props,
         ))
-    clear: list[str] | None = None
-    if p.get("value_quarantined"):
-        reason = p.get("value_quarantine_reason") or ""
-        clear = list(_QUARANTINE_CLEARS.get(reason,
-                                            _QUARANTINE_CLEARS_DEFAULT))
-        # A quarantine event must not smuggle the very values it
-        # withholds back in through set_props.
+    # A rollup-only partial (collapse_modifications) carries no
+    # value-quality signal and is not authoritative about value state:
+    # _contract_clears returns None for it, so its stale-marker / value
+    # clears never fire. A full emit (legacy or backfill quarantine)
+    # clears what it withholds — a quarantine must not smuggle the very
+    # values it withholds back in through set_props.
+    clear = _contract_clears(p)
+    if clear:
         for k in clear:
             set_props.pop(k, None)
     return CypherWrite(
