@@ -674,6 +674,13 @@ class Neo4jSink(EventConsumer):
                 a_label, b_label,
             )
             return
+        if a_key == b_key:
+            # A same-as of an entity with itself is a degenerate
+            # consolidator proposal; a self-loop trips
+            # refs.sameas_no_selfloop and carries no information.
+            logger.debug("AssertSameAs self-reference (%s/%s); skipping",
+                         a_label, a_key)
+            return
         with self._driver.session() as session:
             session.run(
                 f"MATCH (a:{self._match_label(a_label)}), "

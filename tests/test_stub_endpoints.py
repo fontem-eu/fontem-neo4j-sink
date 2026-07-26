@@ -65,3 +65,18 @@ def test_same_as_stays_match_only():
     sink._apply_same_as(w)  # pylint: disable=protected-access
     q = next(c[0] for c in calls if "SAME_AS" in c[0])
     assert "_stub" not in q
+
+
+def test_same_as_self_reference_is_skipped():
+    """A same-as of an entity with itself is a degenerate proposal — it
+    must not create a SAME_AS self-loop (refs.sameas_no_selfloop)."""
+    sink, calls = _make_sink_with_mock_driver()
+    w = mock.MagicMock()
+    w.label = "_SameAs"
+    w.primary_key = {
+        "a_iri": "http://data.fontem.eu/id/Company/g-same",
+        "b_iri": "http://data.fontem.eu/id/Company/g-same",
+    }
+    w.set_props = {"confidence": 0.9}
+    sink._apply_same_as(w)  # pylint: disable=protected-access
+    assert not any("SAME_AS" in c[0] for c in calls)
