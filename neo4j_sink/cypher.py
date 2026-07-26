@@ -258,8 +258,24 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
        NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON edges attached
        to the Contract entity. This is the shape project_contracts used
        to build in batch; the sink now writes it natively.
+
+    A contract *modification* (can-modif) is per-notice provenance on an
+    existing contract and must NEVER carry the :Contract label — a
+    :Contract{notice_type:'can-modif'} makes value aggregates
+    double-count the restatement (grain.no_contract_is_a_modification).
+    The native path (3) already renders a modification as a :Notice plus
+    a high-water-guarded update of the award-keyed :Contract entity (the
+    entity itself never gets notice_type). The legacy notice-grain path
+    (1/2), however, blindly labelled every event :Contract and copied
+    notice_type verbatim, so any keyless can-modif emit — legacy events,
+    but also value/scale-correction re-emits of an old payload
+    (correct_scale_errors) and modification rollups — regressed a
+    modification back onto the :Contract label. Those render as a :Notice
+    instead.
     """
     if p.get("contract_key") is None or set(p).issubset(_ROLLUP_ONLY_KEYS):
+        if _notice_kind(p) == "modification":
+            return _render_notice_grain_modification(p)
         return _render_contract_notice_grain(p)
     return [_render_notice(p), _render_contract_entity(p)]
 
@@ -439,6 +455,36 @@ def _render_contract_entity(p: dict) -> CypherWrite:
         extra_relationships=_contract_entity_edges(p) or None,
         guard_prop="canonical_publication_date",
         always_props=always,
+    )
+
+
+def _render_notice_grain_modification(p: dict) -> CypherWrite:
+    """A can-modif event that arrived without a native contract_key
+    (pre-model legacy events, collapse modification rollups, and
+    value/scale-correction re-emits of an old payload).
+
+    It is a modification *notice*, so it renders as a :Notice — never a
+    :Contract — keyed by ted_notice_id. A keyed modification carrying real
+    notice fields takes the native path instead (which builds :Notice +
+    NOTICE_OF + the guarded entity update); by the time an event falls
+    through to here it has no usable contract_key, so the modification
+    lands as an unlinked :Notice. That is still correct per-notice
+    provenance and, crucially, is not a :Contract. The aggregatable
+    AWARDED / AWARDED_TO edges are deliberately NOT attached (they belong
+    on the entity, not the notice — mirrors project_contracts' phase-4
+    strip)."""
+    set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
+    set_props["notice_kind"] = "modification"
+    set_props.update(contract_red_flags(p))
+    clear = _quarantine_clears(p)
+    if clear:
+        for k in clear:
+            set_props.pop(k, None)
+    return CypherWrite(
+        label="Notice",
+        primary_key={"ted_notice_id": p["ted_notice_id"]},
+        set_props=set_props,
+        clear_props=clear,
     )
 
 
