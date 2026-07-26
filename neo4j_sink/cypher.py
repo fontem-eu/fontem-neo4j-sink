@@ -559,7 +559,7 @@ def _render_notice_grain_modification(p: dict) -> CypherWrite:
     set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
     set_props["notice_kind"] = "modification"
     set_props.update(contract_red_flags(p))
-    clear = _quarantine_clears(p)
+    clear = _contract_clears(p)
     if clear:
         for k in clear:
             set_props.pop(k, None)
