@@ -414,6 +414,52 @@ def test_quarantined_new_model_notice_clears_entity_values_guarded():
     assert "award_value" not in contract.always_props
 
 
+def test_healthy_reemit_clears_stale_marker_on_entity_and_notice():
+    """A re-scored healthy canonical notice strips the stale
+    value_quarantined / reason on BOTH the :Notice (clear_props REMOVE)
+    and the :Contract entity (guarded null) while keeping the value —
+    the fix for values.quarantined_carries_no_value on a contract whose
+    latest emit is healthy but was quarantined by an earlier backfill."""
+    notice, contract = render_upsert_contract(_new_model_payload(
+        value_eur=367977.2, value_quality_flag="ok",
+    ))
+    assert notice.set_props["value_eur"] == 367977.2
+    assert "value_quarantined" in (notice.clear_props or [])
+    assert "value_quarantine_reason" in (notice.clear_props or [])
+    # entity clears via guarded nulls (SET += removes null-valued keys)
+    assert contract.clear_props is None
+    assert contract.set_props["value_quarantined"] is None
+    assert contract.set_props["value_quarantine_reason"] is None
+    assert contract.set_props["value_eur"] == 367977.2   # value survives
+    assert contract.set_props["current_value"] == 367977.2
+
+
+def test_no_awarded_value_clears_negative_on_entity_guarded():
+    """no_awarded_value on the canonical notice must clear a prior
+    (sign-flipped, negative) award value off the entity via guarded
+    nulls — values.contract_value_nonneg."""
+    notice, contract = render_upsert_contract(_new_model_payload(
+        value_eur=None, value_original=None,
+        value_quality_flag="no_awarded_value",
+    ))
+    assert "value_eur" in (notice.clear_props or [])
+    assert contract.clear_props is None
+    assert contract.set_props["value_eur"] is None
+    assert contract.set_props["current_value"] is None
+
+
+def test_nonpositive_tenders_cleared_on_entity_and_notice():
+    """A 0 bidder count is dropped from both writes and REMOVEd from the
+    node — values.contract_bidder_count_positive."""
+    notice, contract = render_upsert_contract(_new_model_payload(
+        tenders_received=0, value_quality_flag="ok",
+    ))
+    assert "tenders_received" not in notice.set_props
+    assert "tenders_received" in (notice.clear_props or [])
+    # entity clears via a guarded null (present as None; SET += removes it)
+    assert contract.set_props["tenders_received"] is None
+
+
 # ── stub lifecycle ────────────────────────────────────────────────
 
 

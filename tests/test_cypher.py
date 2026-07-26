@@ -663,6 +663,74 @@ def test_contract_without_quarantine_has_no_clears():
     assert w.set_props["value_eur"] == 5.0
 
 
+def test_healthy_reemit_clears_stale_quarantine_marker():
+    """A re-scored healthy value (benign flag, not quarantined) must
+    strip the value_quarantined / reason a prior quarantine or backfill
+    event left on the node — SET += never removes them, so the contract
+    would read as quarantined-with-a-value forever
+    (values.quarantined_carries_no_value)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n-heal",
+        "value_eur": 367977.2,
+        "value_currency": "SEK",
+        "value_quality_flag": "ok",
+    })
+    assert w.set_props["value_eur"] == 367977.2       # value kept
+    assert w.clear_props == ["value_quarantined", "value_quarantine_reason"]
+
+
+def test_no_awarded_value_clears_stale_award_value():
+    """no_awarded_value withholds the awarded value; a prior emit's
+    (often sign-flipped, negative) value must be removed, not left stale
+    (values.contract_value_nonneg)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n-nav",
+        "value_quality_flag": "no_awarded_value",
+    })
+    for f in ("value_eur", "value_original", "value_currency",
+              "value_quarantined", "value_quarantine_reason"):
+        assert f in w.clear_props
+
+
+def test_hard_flag_without_quarantine_does_not_wipe_marker():
+    """A hard-flagged value arriving un-quarantined (e.g. a scale
+    re-score that dropped the marker) keeps its quarantine decidable by
+    the loader/backfill — the sink must NOT clear the marker, or a
+    hard-flagged value would render un-quarantined
+    (values.hard_flags_are_quarantined)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n-hard",
+        "value_eur": 5.0,
+        "value_quality_flag": "concession_negative",
+    })
+    assert w.clear_props is None
+
+
+def test_nonpositive_tenders_received_is_cleared():
+    """tenders_received is a bidder COUNT (>= 1); a 0/negative is broken
+    parsing and must be dropped, not stored
+    (values.contract_bidder_count_positive)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "n-bid",
+        "value_eur": 5.0,
+        "value_quality_flag": "ok",
+        "tenders_received": 0,
+    })
+    assert "tenders_received" not in w.set_props
+    assert "tenders_received" in w.clear_props
+
+
+def test_positive_tenders_received_is_kept():
+    w = render_upsert_contract({
+        "ted_notice_id": "n-bid2",
+        "value_eur": 5.0,
+        "value_quality_flag": "ok",
+        "tenders_received": 4,
+    })
+    assert w.set_props["tenders_received"] == 4
+    assert "tenders_received" not in (w.clear_props or [])
+
+
 def test_collapse_respects_set_then_clear_order():
     a = CypherWrite("Contract", {"ted_notice_id": "n"}, {"value_eur": 5.0})
     b = CypherWrite("Contract", {"ted_notice_id": "n"}, {},
