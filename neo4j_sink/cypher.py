@@ -458,6 +458,34 @@ def _party_edge(party: dict) -> "tuple[str, str, dict]":
     )
 
 
+def _entity_value_props(p: dict, guarded: dict) -> "float | None":
+    """Fold this emit's value/clear props into ``guarded`` and return the
+    award value (the figure an award notice stamps as award_value).
+
+    Clears are written as explicit nulls (SET += removes null-valued
+    keys), so they apply only when this notice wins the high-water
+    comparison. Split out of _render_contract_entity to keep that
+    renderer's cognitive complexity in check."""
+    clear = _contract_clears(p)
+    withheld = _value_withheld(clear)
+    if clear:
+        for k in clear:
+            guarded.pop(k, None)
+        guarded.update(dict.fromkeys(clear))
+        if withheld:
+            guarded["current_value"] = None
+    if withheld:
+        return None
+    value = p.get("value_eur")
+    if value is not None or p.get("current_value") is not None:
+        current = p.get("current_value", value)
+        if current is None:
+            current = value
+        guarded["current_value"] = current
+        guarded["value_eur"] = current
+    return value
+
+
 def _render_contract_entity(p: dict) -> CypherWrite:
     """The one-per-real-contract display entity, keyed by contract_key.
 
@@ -483,24 +511,7 @@ def _render_contract_entity(p: dict) -> CypherWrite:
     guarded.update(contract_red_flags(p))
     if pub := p.get("publication_date"):
         guarded["canonical_publication_date"] = pub
-    clear = _contract_clears(p)
-    withheld = _value_withheld(clear)
-    value = None if withheld else p.get("value_eur")
-    if clear:
-        for k in clear:
-            guarded.pop(k, None)
-        # Guarded nulls: SET += removes them, but only when this
-        # notice wins the high-water comparison.
-        guarded.update(dict.fromkeys(clear))
-        if withheld:
-            guarded["current_value"] = None
-    if not withheld and (value is not None
-                         or p.get("current_value") is not None):
-        current = p.get("current_value", value)
-        if current is None:
-            current = value
-        guarded["current_value"] = current
-        guarded["value_eur"] = current
+    value = _entity_value_props(p, guarded)
     always: dict = {"is_current": True}
     if _notice_kind(p) == "award" and value is not None:
         always["award_value"] = value
