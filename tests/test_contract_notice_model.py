@@ -228,6 +228,74 @@ def test_rollup_partial_does_not_create_a_notice():
     assert not any(":Notice" in q for q, _ in calls), calls
 
 
+def test_keyless_modification_renders_notice_not_contract():
+    """A can-modif event that arrives without a native contract_key
+    (pre-model legacy events, and value/scale-correction re-emits of an
+    old payload) must render as a :Notice, never :Contract — otherwise it
+    regresses onto the :Contract label and value aggregates double-count
+    the restatement (grain.no_contract_is_a_modification)."""
+    w = render_upsert_contract({
+        "ted_notice_id": "uuid-mod-legacy",
+        "title": "Modification of the bridge works",
+        "publication_date": "2024-02-01",
+        "value_eur": 2200.0,
+        "notice_type": "can-modif",
+        "authority_id": "auth-1",
+        "company_gmr_id": "co-1",
+    })
+    assert not isinstance(w, list)
+    assert w.label == "Notice"
+    assert w.primary_key == {"ted_notice_id": "uuid-mod-legacy"}
+    assert w.set_props["notice_kind"] == "modification"
+    # aggregatable award edges must NOT ride on a notice
+    assert w.extra_relationships is None
+    # a bare legacy modification has no contract_key -> no NOTICE_OF, but
+    # crucially it is not a :Contract
+    assert "contract_key" not in w.set_props
+
+
+def test_keyed_modification_native_path_never_labels_contract_modif():
+    """A modification carrying a real contract_key + notice fields takes
+    the native path: a :Notice keeps notice_type='can-modif', the entity
+    is updated via the high-water guard, and the :Contract entity never
+    carries notice_type — so it can never be a :Contract{can-modif}."""
+    notice, contract = render_upsert_contract(_new_model_payload(
+        ted_notice_id="uuid-mod-2", notice_kind="modification",
+        notice_type="can-modif", publication_date="2026-06-01",
+        value_eur=3300.0,
+    ))
+    assert notice.label == "Notice"
+    assert notice.set_props["notice_kind"] == "modification"
+    assert contract.label == "Contract"
+    assert "notice_type" not in contract.set_props
+
+
+def test_keyless_modification_never_hits_contract_label_at_sink():
+    """End-to-end through the sink: a keyless can-modif produces a
+    :Notice MERGE and no :Contract MERGE at all."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([_contract_event({
+        "ted_notice_id": "uuid-mod-3", "title": "Mod",
+        "publication_date": "2024-04-01", "value_eur": 10.0,
+        "notice_type": "can-modif", "authority_id": "auth-1",
+        "company_gmr_id": "co-1",
+    })])
+    assert any("MERGE (n:Notice" in q for q, _ in calls), calls
+    assert not any("MERGE (n:Contract" in q for q, _ in calls), calls
+
+
+def test_keyless_award_still_renders_contract_notice_grain():
+    """The fix is scoped to modifications: a keyless *award* keeps the
+    frozen legacy notice-grain :Contract render."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2019-OJS100-1", "title": "Old award",
+        "publication_date": "2019-06-01", "value_eur": 5.0,
+        "authority_id": "auth-1", "company_gmr_id": "co-1",
+    })
+    assert w.label == "Contract"
+    assert w.primary_key == {"ted_notice_id": "2019-OJS100-1"}
+
+
 def test_legacy_modifies_iri_resolution_unchanged():
     """link_ted_modifications events reference notices as
     id/Contract/<ted_notice_id>; that segment must keep resolving to
