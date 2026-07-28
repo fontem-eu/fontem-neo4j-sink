@@ -822,25 +822,26 @@ def test_petition_round_trip():
     assert "collection_deadline" not in w.set_props
 
 
-def test_contract_rollup_partial_sets_only_collapse_fields():
-    """A collapse_modifications rollup-only UpsertContract must set
-    current_value / is_current / contract_key and NOT recompute integrity
-    red flags (which would reset them to defaults on the live node)."""
+def test_contract_rollup_partial_sets_only_current_value_on_entity():
+    """A collapse_modifications rollup-only UpsertContract restates only
+    current_value, on the canonical :Contract entity keyed by
+    contract_key. It must NOT recompute integrity red flags (which would
+    reset them on the live node), NOT set is_current (a per-notice flag),
+    and NOT smuggle contract_key onto a ted_notice_id-grain node."""
     w = render_upsert_contract({
         "ted_notice_id": "2025-OJS111-000001",
         "current_value": 42.0,
         "is_current": False,
         "contract_key": "proc:P-1",
     })
-    assert w.set_props["current_value"] == 42.0
-    assert w.set_props["is_current"] is False
-    assert w.set_props["contract_key"] == "proc:P-1"
-    # no red-flag / value / title fields smuggled in by the rollup
-    leaked = [k for k in w.set_props
-              if k.startswith("is_") and k != "is_current"]
-    assert not leaked, f"red flags leaked into rollup: {leaked}"
+    assert w.primary_key == {"contract_key": "proc:P-1"}
+    assert w.set_props == {"current_value": 42.0}
+    # no red-flag / value / title / is_current fields smuggled in
+    leaked = [k for k in w.set_props if k.startswith("is_")]
+    assert not leaked, f"leaked into rollup: {leaked}"
     assert "value_eur" not in w.set_props
     assert "title" not in w.set_props
+    assert "contract_key" not in w.set_props  # rides in primary_key
 
 
 def test_contract_full_emit_splits_into_notice_and_contract():
