@@ -272,13 +272,16 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
        replayable from seq 0, so this shape is frozen forever.
     2. **Rollup partial** (payload keys are a subset of
        _ROLLUP_ONLY_KEYS) — a collapse_modifications value-rollup.
-       Although it now carries contract_key, its ted_notice_id is a
-       real notice identity and every such event in the log was emitted
-       against a notice-grain graph. It keeps the legacy render (and
-       therefore never creates a :Notice node nor a Contract entity):
-       on replay it lands on the legacy :Contract notice node exactly
-       as it always did, and the pass is inert against a converted
-       graph (no :Contract{notice_type:'can-modif'} rows remain).
+       ``current_value`` is a contract-ENTITY field (the latest restated
+       value across the modification chain), so a rollup that carries
+       ``contract_key`` restates it on the canonical :Contract entity
+       (keyed by contract_key) — NOT on a ted_notice_id-grain :Contract.
+       The old notice-grain render duplicated contract_key onto a second
+       node, which is fine in the pre-native grouping graph but violates
+       contract_contract_key_unique (and re-labels a can-modif notice as
+       a :Contract) the instant the graph is native. A rollup that is
+       missing contract_key (truly pre-native) keeps the frozen
+       notice-grain render for byte-identical replay from seq 0.
     3. **Native Contract/Notice model** (contract_key present + real
        notice fields) — one :Notice node (per-notice provenance), one
        :Contract entity (display fields, high-water-guarded), a
@@ -300,7 +303,16 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
     modification back onto the :Contract label. Those render as a :Notice
     instead.
     """
-    if p.get("contract_key") is None or set(p).issubset(_ROLLUP_ONLY_KEYS):
+    if set(p).issubset(_ROLLUP_ONLY_KEYS):
+        # A collapse_modifications value rollup.
+        if p.get("contract_key") is not None:
+            # Native era: restate current_value on the canonical entity
+            # (keyed by contract_key), never a ted_notice_id-grain node.
+            return _render_contract_entity_value_rollup(p)
+        # Truly pre-native rollup (no contract_key): frozen notice-grain
+        # update, byte-identical on replay against the pre-native graph.
+        return _render_contract_notice_grain(p)
+    if p.get("contract_key") is None:
         if _notice_kind(p) == "modification":
             return _render_notice_grain_modification(p)
         return _render_contract_notice_grain(p)
@@ -538,6 +550,33 @@ def _render_contract_entity(p: dict) -> CypherWrite:
         extra_relationships=_contract_entity_edges(p) or None,
         guard_prop="canonical_publication_date",
         always_props=always,
+    )
+
+
+def _render_contract_entity_value_rollup(p: dict) -> CypherWrite:
+    """A collapse_modifications value rollup in the native-model era (it
+    carries contract_key). current_value is the latest restated value
+    across the contract's modification chain — a contract-ENTITY field —
+    so it lands on the canonical :Contract keyed by contract_key, never a
+    ted_notice_id-grain :Contract. The old notice-grain shape duplicated
+    contract_key onto a second node (violating contract_contract_key_unique
+    once the graph is native) and re-labelled a can-modif notice as a
+    :Contract.
+
+    is_current is the legacy per-notice-node flag; the single entity per
+    contract_key is inherently current (is_current=True is stamped by the
+    full emit), so it is dropped here. value_eur is left untouched —
+    trusted_value_sum reads coalesce(current_value, value_eur), so
+    restating current_value alone is sufficient. Unguarded on purpose: the
+    rollup is the post-collapse authority on current_value and is emitted
+    after the notices it collapses, so last-writer-wins converges on replay."""
+    props: dict = {}
+    if p.get("current_value") is not None:
+        props["current_value"] = p["current_value"]
+    return CypherWrite(
+        label="Contract",
+        primary_key={"contract_key": p["contract_key"]},
+        set_props=props,
     )
 
 

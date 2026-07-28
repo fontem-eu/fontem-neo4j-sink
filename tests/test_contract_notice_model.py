@@ -205,11 +205,12 @@ def test_old_shape_event_renders_legacy_cypher_byte_identical():
     )
 
 
-def test_rollup_partial_does_not_create_a_notice():
-    """collapse_modifications rollup partials now carry contract_key but
-    were all emitted against notice-grain graphs: they keep the legacy
-    :Contract{ted_notice_id} render and never mint a :Notice node or a
-    Contract entity."""
+def test_rollup_partial_restates_current_value_on_the_entity():
+    """A collapse_modifications rollup that carries contract_key restates
+    current_value on the canonical :Contract entity (keyed by
+    contract_key), never a ted_notice_id-grain :Contract. It must not set
+    contract_key as a property (that is the primary key of a SECOND node),
+    which would trip contract_contract_key_unique, nor mint a :Notice."""
     w = render_upsert_contract({
         "ted_notice_id": "uuid-n1",
         "contract_key": "proc:P-1",
@@ -218,14 +219,42 @@ def test_rollup_partial_does_not_create_a_notice():
     })
     assert not isinstance(w, list)
     assert w.label == "Contract"
-    assert w.primary_key == {"ted_notice_id": "uuid-n1"}
-    assert w.set_props["contract_key"] == "proc:P-1"
+    assert w.primary_key == {"contract_key": "proc:P-1"}
+    assert w.set_props == {"current_value": 42.0}
+    # is_current is a per-notice flag; the single entity is inherently
+    # current, so the rollup never restates it.
+    assert "is_current" not in w.set_props
+    # contract_key rides in the primary_key, never smuggled as a prop
+    # onto a ted_notice_id node.
+    assert "ted_notice_id" not in w.primary_key
     sink, calls = _make_sink_with_mock_driver()
     sink.handle([_contract_event({
         "ted_notice_id": "uuid-n1", "contract_key": "proc:P-1",
         "current_value": 42.0, "is_current": False,
     })])
     assert not any(":Notice" in q for q, _ in calls), calls
+    # the MERGE keys on contract_key, not ted_notice_id
+    assert any("contract_key: row.contract_key" in q for q, _ in calls), calls
+
+
+def test_modification_rollup_keys_on_contract_not_notice():
+    """Regression for the neo4j DLQ contract_key collision: a
+    collapse_modifications rollup for a modification notice carries a
+    ted_notice_id (the modification) DIFFERENT from its contract_key (the
+    canonical contract). The old render MERGEd (:Contract {ted_notice_id})
+    and SET contract_key = <canonical>, minting a second node that claims
+    a contract_key already owned by the canonical entity —
+    ConstraintValidationFailed. The write must key on contract_key so it
+    lands on the one canonical node."""
+    w = render_upsert_contract({
+        "ted_notice_id": "modif-notice-n2",
+        "contract_key": "proc:P-canonical",
+        "current_value": 1242270.42,
+        "is_current": False,
+    })
+    assert w.primary_key == {"contract_key": "proc:P-canonical"}
+    assert "ted_notice_id" not in w.set_props
+    assert "contract_key" not in w.set_props
 
 
 def test_keyless_modification_renders_notice_not_contract():
