@@ -247,12 +247,12 @@ def test_modification_rollup_keys_on_contract_not_notice():
     ConstraintValidationFailed. The write must key on contract_key so it
     lands on the one canonical node."""
     w = render_upsert_contract({
-        "ted_notice_id": "dee0acd0-modif-notice",
-        "contract_key": "357e7f4b-canonical",
+        "ted_notice_id": "modif-notice-n2",
+        "contract_key": "proc:P-canonical",
         "current_value": 1242270.42,
         "is_current": False,
     })
-    assert w.primary_key == {"contract_key": "357e7f4b-canonical"}
+    assert w.primary_key == {"contract_key": "proc:P-canonical"}
     assert "ted_notice_id" not in w.set_props
     assert "contract_key" not in w.set_props
 
