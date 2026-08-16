@@ -35,13 +35,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
+          repository: void42/ci-actions
+          path: .ci-actions
           token: ${{ secrets.CI_READ_TOKEN }}
       - name: OSV-Scanner lockfile gate
-        uses: ./.fontem-ci/actions/osv-scan
+        uses: ./.ci-actions/actions/osv-scan
       - name: Secret scan (gitleaks)
-        uses: ./.fontem-ci/actions/secret-scan
+        uses: ./.ci-actions/actions/secret-scan
 
   analyze:
     needs: test
@@ -50,8 +50,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
+          repository: void42/ci-actions
+          path: .ci-actions
           token: ${{ secrets.CI_READ_TOKEN }}
       - name: Install dependencies and generate coverage
         env:
@@ -68,7 +68,7 @@ jobs:
           pip install --no-cache-dir -e '.[test]'
           pip install --no-cache-dir pylint pytest-cov
           pytest --cov=neo4j_sink --cov-report=xml:coverage.xml || true
-      - uses: ./.fontem-ci/actions/sonar-scan
+      - uses: ./.ci-actions/actions/sonar-scan
         with:
           sonar-token: ${{ secrets.SONAR_TOKEN }}
 
@@ -80,22 +80,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
+          repository: void42/ci-actions
+          path: .ci-actions
           token: ${{ secrets.CI_READ_TOKEN }}
 
       - id: sbom
         name: Generate + upload SBOM
-        uses: ./.fontem-ci/actions/sbom-generate
+        uses: ./.ci-actions/actions/sbom-generate
         with:
           language: python
           project-name: fontem-neo4j-sink
           project-version: ${{ github.sha }}
-          dtrack-key: ${{ secrets.DTRACK_API_KEY }}
 
       - id: image
         name: Build, push, sign, attest
-        uses: ./.fontem-ci/actions/docker-build-sign
+        uses: ./.ci-actions/actions/docker-build-sign
         with:
           image: contribute.void42.internal/fontem/fontem-neo4j-sink
           cosign-key: ${{ secrets.COSIGN_KEY }}
