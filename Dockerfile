@@ -7,6 +7,7 @@ COPY void42-ca.crt /tmp/void42-ca.crt
 RUN cat /tmp/void42-ca.crt >> /etc/ssl/certs/ca-certificates.crt
 RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
+WORKDIR /build
 COPY pyproject.toml .
 COPY neo4j_sink/ ./neo4j_sink/
 COPY vendor/*.whl /tmp/wheels/
