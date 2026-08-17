@@ -1,30 +1,25 @@
-FROM python:3.14-slim
-
-COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
-RUN apt-get update -y \
- && apt-get install -y --no-install-recommends ca-certificates \
- && update-ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-
+# ── build: venv + void42 CA + local package/vendored wheels ───────────────────
+FROM cgr.void42.internal/chainguard/python:latest-dev AS build
+USER root
 ENV PIP_INDEX_URL=https://nexus.void42.internal/repository/pypi-proxy/simple/ \
     PIP_TRUSTED_HOST=nexus.void42.internal
-
-WORKDIR /app
+COPY void42-ca.crt /tmp/void42-ca.crt
+RUN cat /tmp/void42-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
 COPY pyproject.toml .
 COPY neo4j_sink/ ./neo4j_sink/
-
-# Vendored wheels — pinned by filename. To bump fontem-events or
-# fontem-event-schemas: build a new wheel in the producing repo,
-# drop it into vendor/, delete the old one, and update the version
-# pins in pyproject.toml. The pin + the wheel filename must agree;
-# pip refuses to satisfy the pin from a wheel with a different
-# version, so a mismatch fails the build.
 COPY vendor/*.whl /tmp/wheels/
-RUN pip install --no-cache-dir /tmp/wheels/*.whl . \
- && rm -rf /tmp/wheels
+RUN pip install --no-cache-dir /tmp/wheels/*.whl .
 
-RUN useradd --create-home --shell /bin/bash sink
-USER sink
-
+# ── runtime: distroless; neo4j_sink installed into the venv ───────────────────
+FROM cgr.void42.internal/chainguard/python:latest
+WORKDIR /app
+COPY --from=build /venv /venv
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV PATH="/venv/bin:$PATH" \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+USER 65532
 EXPOSE 9100
-ENTRYPOINT ["python", "-m", "neo4j_sink"]
+ENTRYPOINT ["/venv/bin/python", "-m", "neo4j_sink"]
