@@ -14,14 +14,15 @@ jobs:
         env:
           GMR_CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
-          # Internal deps that aren't on the proxy index — clone + install.
-          tmpdir=$(mktemp -d)
-          for repo in fontem-event-schemas fontem-events; do
-              git clone --depth 1 \
-                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
-                  "$tmpdir/$repo"
-              pip install --no-cache-dir "$tmpdir/$repo"
-          done
+          # Internal deps that aren't on the proxy index. Install the
+          # VENDORED wheels — the same artifacts the Docker build uses —
+          # rather than cloning each dependency's main. Cloning main broke
+          # this build twice: pyproject pins an exact version so the
+          # vendored wheel and the pin cannot drift, and every bump of
+          # fontem-events then failed CI here with "No matching
+          # distribution found for fontem-events==<old>". Testing what
+          # actually ships is also simply more correct.
+          pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -e '.[test]'
           pip install --no-cache-dir pylint
       - name: pytest
@@ -57,14 +58,15 @@ jobs:
         env:
           GMR_CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
-          # Internal deps that aren't on the proxy index — clone + install.
-          tmpdir=$(mktemp -d)
-          for repo in fontem-event-schemas fontem-events; do
-              git clone --depth 1 \
-                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
-                  "$tmpdir/$repo"
-              pip install --no-cache-dir "$tmpdir/$repo"
-          done
+          # Internal deps that aren't on the proxy index. Install the
+          # VENDORED wheels — the same artifacts the Docker build uses —
+          # rather than cloning each dependency's main. Cloning main broke
+          # this build twice: pyproject pins an exact version so the
+          # vendored wheel and the pin cannot drift, and every bump of
+          # fontem-events then failed CI here with "No matching
+          # distribution found for fontem-events==<old>". Testing what
+          # actually ships is also simply more correct.
+          pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -e '.[test]'
           pip install --no-cache-dir pylint pytest-cov
           pytest --cov=neo4j_sink --cov-report=xml:coverage.xml || true
