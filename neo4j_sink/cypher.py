@@ -859,10 +859,13 @@ def render_upsert_exchange_rate(p: dict) -> CypherWrite:
 
 
 def render_assert_same_as(p: dict) -> CypherWrite:
-    """Emitted as a SAME_AS edge between the two IRIs' Neo4j
-    nodes. The sink resolves IRI → (label, key) by parsing the
-    IRI; deferred until the sink layer because it's coupled to
-    the Virtuoso IRI scheme.
+    """An APPROVED equivalence: a SAME_AS edge between the two IRIs'
+    Neo4j nodes. The sink resolves IRI → (label, key) by parsing the
+    IRI; deferred until the sink layer because it's coupled to the
+    Virtuoso IRI scheme.
+
+    Not a proposal. An unreviewed match is a :SAME_AS_CANDIDATE written
+    by the consolidator directly and never reaches the event stream.
     """
     return CypherWrite(
         label="_SameAs",  # virtual; the sink handles this specially
@@ -876,6 +879,28 @@ def render_assert_same_as(p: dict) -> CypherWrite:
             "tier": p.get("tier"),
             "matched_via_alias": p.get("matched_via_alias", False),
             "rule": p.get("rule"),
+        },
+    )
+
+
+def render_retract_same_as(p: dict) -> CypherWrite:
+    """Withdraws an equivalence that was asserted and turned out wrong.
+
+    The sink deletes the SAME_AS edge and records :NOT_SAME_AS so the
+    consolidator's rules will not re-propose the pair — they are
+    deterministic and would otherwise reach the same wrong conclusion on
+    the next sweep.
+    """
+    return CypherWrite(
+        label="_NotSameAs",  # virtual; the sink handles this specially
+        primary_key={
+            "a_iri": p["a_iri"],
+            "b_iri": p["b_iri"],
+        },
+        set_props={
+            "reason": p["reason"],
+            "reviewer": p.get("reviewer"),
+            "retracted_method": p.get("retracted_method"),
         },
     )
 
@@ -919,6 +944,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertDisclosure": render_upsert_disclosure,
     "UpsertExchangeRate": render_upsert_exchange_rate,
     "AssertSameAs": render_assert_same_as,
+    "RetractSameAs": render_retract_same_as,
 }
 
 

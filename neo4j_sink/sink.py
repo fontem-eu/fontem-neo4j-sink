@@ -277,7 +277,7 @@ class Neo4jSink(EventConsumer):
 
         self, label: str, writes: list[CypherWrite],
     ) -> None:
-        if label == "_SameAs":
+        if label in ("_SameAs", "_NotSameAs"):
             self._flush_same_as_bracket(writes)
             return
         # PUT-replace semantics: drop everything with this label,
@@ -334,7 +334,10 @@ class Neo4jSink(EventConsumer):
         # SameAs has no PUT-replace semantics; bracketed delivery
         # is just a batching hint. We don't pre-delete.
         for w in writes:
-            self._apply_same_as(w)
+            if w.label == "_NotSameAs":
+                self._apply_not_same_as(w)
+            else:
+                self._apply_same_as(w)
 
     def _apply_batch(self, writes: list[CypherWrite]) -> None:
         """Apply a run of non-bracketed writes in UNWIND-grouped passes
@@ -343,14 +346,20 @@ class Neo4jSink(EventConsumer):
         resolve), then their extra-relationships, then typed
         relationships, then SameAs."""
         same_as = [w for w in writes if w.label == "_SameAs"]
+        not_same_as = [w for w in writes if w.label == "_NotSameAs"]
         typed_rels = [w for w in writes if w.label == "_Relationship"]
         nodes = [w for w in writes
-                 if w.label not in ("_SameAs", "_Relationship")]
+                 if w.label not in ("_SameAs", "_NotSameAs", "_Relationship")]
         rel_items = self._flush_nodes(nodes)
         self._flush_extra_relationships(rel_items)
         self._flush_typed_relationships(typed_rels)
         for w in same_as:
             self._apply_same_as(w)
+        # Retractions last: a batch containing both an assertion and its
+        # retraction must end with the pair retracted, whatever order the
+        # two events arrived in within the batch.
+        for w in not_same_as:
+            self._apply_not_same_as(w)
 
     @staticmethod
     def _collapse_node_writes(nodes: list[CypherWrite]) -> list[CypherWrite]:
@@ -622,6 +631,9 @@ class Neo4jSink(EventConsumer):
         if w.label == "_SameAs":
             self._apply_same_as(w)
             return
+        if w.label == "_NotSameAs":
+            self._apply_not_same_as(w)
+            return
         if w.label == "_Relationship":
             self._apply_typed_relationship(w)
             return
@@ -658,12 +670,20 @@ class Neo4jSink(EventConsumer):
                                      rel_type, target_iri, props)
 
     def _apply_same_as(self, w: CypherWrite) -> None:
-        # Deliberately MATCH-only (no stub creation): SAME_AS is a
-        # DERIVED proposal the consolidator computed from entities it
-        # read out of this graph — if an endpoint has since vanished,
-        # the proposal is void and dropping it is correct. Stubs are
-        # for source-STATED facts (awards, filings, ownership), which
-        # must never be lost to ingest-order timing.
+        # `reviewed` is deliberately NOT set here. AssertSameAs used to
+        # mean "the consolidator matched these", and this sink stamped
+        # reviewed=false so the review queue would pick the edge up —
+        # which made a guess indistinguishable from a conclusion for
+        # every consumer that traverses SAME_AS. Proposals are now
+        # :SAME_AS_CANDIDATE, written by the consolidator and never
+        # emitted; a SAME_AS edge means the equivalence was approved.
+        #
+        # Deliberately MATCH-only (no stub creation): SAME_AS is
+        # DERIVED from entities the consolidator read out of this graph
+        # — if an endpoint has since vanished, the assertion is void and
+        # dropping it is correct. Stubs are for source-STATED facts
+        # (awards, filings, ownership), which must never be lost to
+        # ingest-order timing.
         # IRIs are http://data.fontem.eu/id/<Label>/<key>. Parse
         # them into label + key for the MATCH.
         a_label, a_key = self._iri_to_label_key(w.primary_key["a_iri"])
@@ -688,7 +708,41 @@ class Neo4jSink(EventConsumer):
                 f"WHERE a.{self._key_field(a_label)} = $ak "
                 f"  AND b.{self._key_field(b_label)} = $bk "
                 f"MERGE (a)-[r:SAME_AS]->(b) "
-                f"ON CREATE SET r += $props, r.reviewed = false",
+                f"SET r += $props, r.origin = 'event'",
+                ak=a_key, bk=b_key, props=w.set_props,
+            )
+
+    def _apply_not_same_as(self, w: CypherWrite) -> None:
+        """RetractSameAs: drop the assertion, record the correction.
+
+        Both the SAME_AS edge and any candidate for the pair go, and
+        :NOT_SAME_AS stays behind as the durable block. Without that
+        block the consolidator's rules — which are deterministic — would
+        re-propose the same pair on the next sweep, so the correction
+        would silently undo itself.
+        """
+        a_label, a_key = self._iri_to_label_key(w.primary_key["a_iri"])
+        b_label, b_key = self._iri_to_label_key(w.primary_key["b_iri"])
+        if a_label != b_label or a_key == b_key:
+            logger.warning(
+                "RetractSameAs across labels or self-referential "
+                "(%s/%s vs %s/%s); skipping",
+                a_label, a_key, b_label, b_key,
+            )
+            return
+        with self._driver.session() as session:
+            session.run(
+                f"MATCH (a:{self._match_label(a_label)}), "
+                f"(b:{self._match_label(b_label)}) "
+                f"WHERE a.{self._key_field(a_label)} = $ak "
+                f"  AND b.{self._key_field(b_label)} = $bk "
+                # Undirected: which way the assertion was written depends
+                # on which side the consolidator treated as the source.
+                f"OPTIONAL MATCH (a)-[s:SAME_AS]-(b) DELETE s "
+                f"WITH a, b "
+                f"OPTIONAL MATCH (a)-[c:SAME_AS_CANDIDATE]-(b) DELETE c "
+                f"WITH a, b "
+                f"MERGE (a)-[n:NOT_SAME_AS]->(b) SET n += $props",
                 ak=a_key, bk=b_key, props=w.set_props,
             )
 
