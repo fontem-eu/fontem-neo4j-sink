@@ -9,7 +9,7 @@ from neo4j_sink.cypher import (
     CypherWrite,
     render_upsert_investment_fund,
     RENDERERS, label_for_graph,
-    render_assert_same_as, render_upsert_authority,
+    render_upsert_authority,
     render_upsert_company, render_upsert_contract,
     render_upsert_disclosure, render_upsert_exchange_rate,
     render_upsert_filing, render_upsert_listing,
@@ -58,14 +58,17 @@ def test_filing_extra_relationship_to_company():
     )
 
 
-def test_same_as_carries_iris_in_key():
-    w = render_assert_same_as({
-        "a_iri": "http://x", "b_iri": "http://y",
-        "confidence": 0.9, "method": "exact_lei",
-    })
-    assert w.label == "_SameAs"
-    assert w.primary_key == {"a_iri": "http://x", "b_iri": "http://y"}
-    assert w.set_props["confidence"] == 0.9
+def test_assert_same_as_is_not_rendered_for_neo4j():
+    """Identity lives in Virtuoso. A SAME_AS edge here would be a second
+    copy of a fact nothing in Neo4j follows — and the sink used to stamp
+    it `reviewed = false`, which made every guess look like a conclusion
+    to anything traversing the type.
+
+    The registry entry stays, mapped to None, so the event type is still
+    known and nobody re-adds a renderer by accident.
+    """
+    assert "AssertSameAs" in RENDERERS
+    assert RENDERERS["AssertSameAs"] is None
 
 
 def test_label_for_graph():
