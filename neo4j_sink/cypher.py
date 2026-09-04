@@ -858,38 +858,30 @@ def render_upsert_exchange_rate(p: dict) -> CypherWrite:
     )
 
 
-def render_assert_same_as(p: dict) -> CypherWrite:
-    """An APPROVED equivalence: a SAME_AS edge between the two IRIs'
-    Neo4j nodes. The sink resolves IRI → (label, key) by parsing the
-    IRI; deferred until the sink layer because it's coupled to the
-    Virtuoso IRI scheme.
-
-    Not a proposal. An unreviewed match is a :SAME_AS_CANDIDATE written
-    by the consolidator directly and never reaches the event stream.
-    """
-    return CypherWrite(
-        label="_SameAs",  # virtual; the sink handles this specially
-        primary_key={
-            "a_iri": p["a_iri"],
-            "b_iri": p["b_iri"],
-        },
-        set_props={
-            "confidence": p["confidence"],
-            "method": p["method"],
-            "tier": p.get("tier"),
-            "matched_via_alias": p.get("matched_via_alias", False),
-            "rule": p.get("rule"),
-        },
-    )
+# AssertSameAs is deliberately NOT rendered for Neo4j.
+#
+# Identity lives in Virtuoso, where owl:sameAs is closed transitively and
+# symmetrically by the store. A SAME_AS edge here was a second copy of
+# that fact which nothing in Neo4j followed — and because the sink
+# stamped it `reviewed = false`, it also made every guess look like a
+# conclusion to anything traversing the type.
+#
+# Neo4j keeps the graph and the review workflow: :SAME_AS_CANDIDATE and
+# :NOT_SAME_AS, both written by the consolidator directly. A query that
+# needs traversal AND identity federates across the two stores.
+#
+# The entry stays in RENDERERS mapped to None so the registry sentinel
+# still lists the event type and nobody re-adds a renderer by accident.
 
 
 def render_retract_same_as(p: dict) -> CypherWrite:
     """Withdraws an equivalence that was asserted and turned out wrong.
 
-    The sink deletes the SAME_AS edge and records :NOT_SAME_AS so the
-    consolidator's rules will not re-propose the pair — they are
-    deterministic and would otherwise reach the same wrong conclusion on
-    the next sweep.
+    Virtuoso drops the owl:sameAs. Neo4j's part is the durable block:
+    :NOT_SAME_AS, so the consolidator's rules will not re-propose the
+    pair — they are deterministic and would otherwise reach the same
+    wrong conclusion on the next sweep — plus clearing the settled
+    candidate so the queue does not re-offer it.
     """
     return CypherWrite(
         label="_NotSameAs",  # virtual; the sink handles this specially
@@ -943,7 +935,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertRelationship": render_upsert_relationship,
     "UpsertDisclosure": render_upsert_disclosure,
     "UpsertExchangeRate": render_upsert_exchange_rate,
-    "AssertSameAs": render_assert_same_as,
+    "AssertSameAs": None,  # see the note above render_retract_same_as
     "RetractSameAs": render_retract_same_as,
 }
 
