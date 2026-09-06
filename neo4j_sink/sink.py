@@ -21,6 +21,7 @@ from collections import defaultdict
 from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
 from neo4j import GraphDatabase
+from neo4j import exceptions as neo4j_exceptions
 
 from .cypher import RENDERERS, CypherWrite, label_for_graph
 
@@ -56,6 +57,27 @@ class Neo4jSink(EventConsumer):
         # handle() calls because batch_size caps each fetch.
         self._bracket_writes: dict[str, list[CypherWrite]] = defaultdict(list)
         self._bracket_label: dict[str, str] = {}
+
+    def is_retryable(self, exc: Exception) -> bool:
+        """Is this Neo4j being unavailable rather than a bad event?
+
+        EventConsumer skips an event that fails max_attempts times in a
+        row. That is right for bad data and wrong for an outage: the
+        event log is the only copy, and nothing re-emits a skipped
+        event, so a Neo4j restart would silently punch a permanent hole
+        in the graph. Exactly that happened to virtuoso_sink on
+        2026-09-06, which lost 4,006 events to "Connection refused".
+
+        Everything listed here is a property of the server or the
+        connection, never of the payload. A ClientError — a Cypher
+        syntax or constraint problem — is NOT retryable: that is the
+        poison case the skip exists for.
+        """
+        return isinstance(exc, (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.SessionExpired,
+            neo4j_exceptions.TransientError,
+        ))
 
     def handle(self, batch: list[EventEnvelope]) -> None:
         bracket_writes = self._bracket_writes
