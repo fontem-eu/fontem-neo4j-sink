@@ -15,40 +15,17 @@ Per-entity (no bracket) updates fire one MERGE statement each.
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass
 from typing import Callable
 
 from fontem_event_schemas.integrity import contract_red_flags
 
-
-@dataclass
-class CypherWrite:  # pylint: disable=too-many-instance-attributes
-    # A write is a value bag by design; the guard/always pair is
-    # what lets the sink express the Contract entity's high-water
-    # semantics without a second write type.
-    """One MERGE/SET statement worth of parameters."""
-    label: str                  # 'Company', 'SanctionedEntity', 'Filing', …
-    primary_key: dict           # {'gmr_id': '…'} or {'entity_id': '…'}
-    set_props: dict             # the rest of the entity body
-    extra_relationships: "list[tuple[str, str, dict]] | None" = None  # rel_type, target_iri, props
-    extra_labels: list[str] | None = None  # secondary labels, e.g. ['Lobbyist']
-    # Properties to REMOVE from the node. Needed because SET n += props
-    # never deletes: a quarantined contract value that was rendered
-    # before the quarantine event must be explicitly cleared.
-    clear_props: list[str] | None = None
-    # High-water-mark guard: when set, `set_props` may only be applied
-    # when row.props.<guard_prop> >= the node's current <guard_prop>
-    # (string comparison; ISO dates order correctly). The sink renders
-    # a FOREACH-CASE conditional SET instead of a blind `SET n +=`, so
-    # replay from seq 0 and out-of-order delivery converge on the same
-    # state (the latest notice wins). Guarded writes are never
-    # dict-collapsed in a batch — each row applies sequentially with
-    # the guard, which IS the sequential per-event semantics.
-    guard_prop: str | None = None
-    # Props applied unconditionally even on a guarded write (e.g. the
-    # award_value stamped by an award notice must survive a later
-    # modification having already raised the high-water mark).
-    always_props: dict | None = None
+from neo4j_sink.identity import (
+    render_assert_same_as,
+    render_retract_same_as,
+)
+# Re-exported: CypherWrite lived here until identity.py needed it
+# too, and every caller and test imports it from this module.
+from neo4j_sink.writes import CypherWrite
 
 
 def render_upsert_company(p: dict) -> CypherWrite:
@@ -858,45 +835,6 @@ def render_upsert_exchange_rate(p: dict) -> CypherWrite:
     )
 
 
-# AssertSameAs is deliberately NOT rendered for Neo4j.
-#
-# Identity lives in Virtuoso, where owl:sameAs is closed transitively and
-# symmetrically by the store. A SAME_AS edge here was a second copy of
-# that fact which nothing in Neo4j followed — and because the sink
-# stamped it `reviewed = false`, it also made every guess look like a
-# conclusion to anything traversing the type.
-#
-# Neo4j keeps the graph and the review workflow: :SAME_AS_CANDIDATE and
-# :NOT_SAME_AS, both written by the consolidator directly. A query that
-# needs traversal AND identity federates across the two stores.
-#
-# The entry stays in RENDERERS mapped to None so the registry sentinel
-# still lists the event type and nobody re-adds a renderer by accident.
-
-
-def render_retract_same_as(p: dict) -> CypherWrite:
-    """Withdraws an equivalence that was asserted and turned out wrong.
-
-    Virtuoso drops the owl:sameAs. Neo4j's part is the durable block:
-    :NOT_SAME_AS, so the consolidator's rules will not re-propose the
-    pair — they are deterministic and would otherwise reach the same
-    wrong conclusion on the next sweep — plus clearing the settled
-    candidate so the queue does not re-offer it.
-    """
-    return CypherWrite(
-        label="_NotSameAs",  # virtual; the sink handles this specially
-        primary_key={
-            "a_iri": p["a_iri"],
-            "b_iri": p["b_iri"],
-        },
-        set_props={
-            "reason": p["reason"],
-            "reviewer": p.get("reviewer"),
-            "retracted_method": p.get("retracted_method"),
-        },
-    )
-
-
 def render_upsert_petition(p: dict) -> CypherWrite:
     """Public petition keyed by (system, petition_id) — e.g. the EU
     Citizens' Initiative register. Organizer names arrive as parallel
@@ -935,7 +873,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertRelationship": render_upsert_relationship,
     "UpsertDisclosure": render_upsert_disclosure,
     "UpsertExchangeRate": render_upsert_exchange_rate,
-    "AssertSameAs": None,  # see the note above render_retract_same_as
+    "AssertSameAs": render_assert_same_as,
     "RetractSameAs": render_retract_same_as,
 }
 
