@@ -58,17 +58,31 @@ def test_filing_extra_relationship_to_company():
     )
 
 
-def test_assert_same_as_is_not_rendered_for_neo4j():
-    """Identity lives in Virtuoso. A SAME_AS edge here would be a second
-    copy of a fact nothing in Neo4j follows — and the sink used to stamp
-    it `reviewed = false`, which made every guess look like a conclusion
-    to anything traversing the type.
+def test_assert_same_as_renders_a_same_as_edge():
+    """Identity is back in this graph, because the read path needs
+    identity AND traversal in one query.
 
-    The registry entry stays, mapped to None, so the event type is still
-    known and nobody re-adds a renderer by accident.
+    c3e342c removed the renderer on the grounds that nothing in Neo4j
+    followed the edge. Something does now: the contract endpoints and the
+    graph explorer resolve an identity class by traversing :SAME_AS, the
+    way the Virtuoso side walks (owl:sameAs|^owl:sameAs)*.
+
+    The `reviewed = false` stamp that made a guess look like a conclusion
+    is not coming back with it — see test_assert_same_as_never_stamps_reviewed.
     """
     assert "AssertSameAs" in RENDERERS
-    assert RENDERERS["AssertSameAs"] is None
+    w = RENDERERS["AssertSameAs"]({
+        "a_iri": "http://data.fontem.eu/id/Company/aaaa",
+        "b_iri": "http://data.fontem.eu/id/Company/bbbb",
+        "confidence": 0.97, "method": "lei_match",
+    })
+    assert w.label == "_SameAs"
+    assert w.primary_key == {
+        "a_iri": "http://data.fontem.eu/id/Company/aaaa",
+        "b_iri": "http://data.fontem.eu/id/Company/bbbb",
+    }
+    assert w.set_props["confidence"] == 0.97
+    assert w.set_props["method"] == "lei_match"
 
 
 def test_label_for_graph():
