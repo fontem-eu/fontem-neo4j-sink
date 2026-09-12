@@ -263,8 +263,12 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
        notice fields) — one :Notice node (per-notice provenance), one
        :Contract entity (display fields, high-water-guarded), a
        NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON edges attached
-       to the Contract entity. This is the shape project_contracts used
-       to build in batch; the sink now writes it natively.
+       to the Contract entity, followed by the contract-chain step
+       (:func:`_render_contract_chain`) that links the notice to what it
+       modifies, folds every notice of the chain onto the root award's
+       entity and maintains is_current / award_ingested /
+       current_value. This is the shape project_contracts used to
+       build in batch; the sink now writes it natively.
 
     A contract *modification* (can-modif) is per-notice provenance on an
     existing contract and must NEVER carry the :Contract label — a
@@ -293,7 +297,34 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
         if _notice_kind(p) == "modification":
             return _render_notice_grain_modification(p)
         return _render_contract_notice_grain(p)
-    return [_render_notice(p), _render_contract_entity(p)]
+    return [
+        _render_notice(p), _render_contract_entity(p),
+        _render_contract_chain(p),
+    ]
+
+
+def _render_contract_chain(p: dict) -> CypherWrite:
+    """The contract-chain step for one native notice, applied by the
+    sink after the notice, its entity and its NOTICE_OF edge exist
+    (see Neo4jSink._apply_contract_chains).
+
+    A modification carries its back-link (BT-1501) in one of two forms;
+    the sink resolves it against the graph on write — never against
+    TED — so the MODIFIES edge exists from the first event, not from a
+    later linking pass. An award resolves the reverse direction too, so
+    a late-arriving award picks up modifications already in the graph.
+    Every notice of the chain then shares ONE :Contract entity, the
+    root award's (its key), and the entity's roll-up fields are
+    recomputed from the chain. Replay from seq 0 converges: the
+    outcome depends on the chain, not on arrival order."""
+    return CypherWrite(
+        label="_ContractChain",
+        primary_key={"ted_notice_id": p["ted_notice_id"]},
+        set_props={
+            "modifies_notice_id": p.get("modifies_notice_id"),
+            "modifies_publication_number": p.get("modifies_publication_number"),
+        },
+    )
 
 
 def _notice_kind(p: dict) -> str:
@@ -324,6 +355,10 @@ _NOTICE_FIELDS: tuple[str, ...] = (
     "award_criterion_type", "submission_deadline",
     "is_framework", "eu_funded", "funding_programme",
     "procedure_id", "notice_type", "modifies_publication_number",
+    # Identity stamps the parser reads off the notice XML (2026-09,
+    # single ingest path): the notice version, the back-link in its
+    # versioned-UUID form, and the legacy authority file reference.
+    "notice_version", "modifies_notice_id", "legacy_procedure_id",
 )
 
 # Fields NOT denormalised onto the Contract entity: notice identity
@@ -331,6 +366,7 @@ _NOTICE_FIELDS: tuple[str, ...] = (
 # them on the entity for the same reason).
 _NOTICE_ONLY_FIELDS = frozenset({
     "notice_type", "modifies_publication_number",
+    "notice_version", "modifies_notice_id",
 })
 
 # Edge props carried per parties[] item onto AWARDED_TO / BID_ON.

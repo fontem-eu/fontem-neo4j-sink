@@ -875,8 +875,10 @@ def test_contract_full_emit_splits_into_notice_and_contract():
         "current_value": 90.0,
         "contract_key": "proc:P-2",
     })
-    assert isinstance(writes, list) and len(writes) == 2
-    notice, contract = writes
+    assert isinstance(writes, list) and len(writes) == 3
+    notice, contract, chain = writes
+    assert chain.label == "_ContractChain"
+    assert chain.primary_key == {"ted_notice_id": "2025-OJS111-000002"}
     assert notice.label == "Notice"
     assert notice.primary_key == {"ted_notice_id": "2025-OJS111-000002"}
     assert notice.set_props["value_eur"] == 100.0

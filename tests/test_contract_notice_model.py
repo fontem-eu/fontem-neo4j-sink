@@ -7,6 +7,7 @@ Old-shape events (no contract_key) and collapse_modifications rollup
 partials keep the legacy notice-grain render byte-for-byte — the event log
 is append-only and replayable from seq 0."""
 # pylint: disable=protected-access
+from neo4j_sink import chain as chain_mod
 from neo4j_sink.cypher import render_upsert_contract
 from neo4j_sink.sink import Neo4jSink
 from tests.test_bracket_loss_repro import _ev, _make_sink_with_mock_driver
@@ -42,7 +43,7 @@ def _contract_event(payload, seq=1):
 
 
 def test_new_shape_renders_notice_and_contract_entity():
-    notice, contract = render_upsert_contract(_new_model_payload())
+    notice, contract, _chain = render_upsert_contract(_new_model_payload())
     assert notice.label == "Notice"
     assert notice.primary_key == {"ted_notice_id": "uuid-award-1"}
     assert notice.set_props["notice_kind"] == "award"
@@ -63,7 +64,7 @@ def test_new_shape_renders_notice_and_contract_entity():
 
 
 def test_notice_of_edge_targets_contract_entity_iri():
-    notice, _ = render_upsert_contract(_new_model_payload())
+    notice, _, _ = render_upsert_contract(_new_model_payload())
     rels = notice.extra_relationships or []
     assert rels == [(
         "NOTICE_OF",
@@ -73,7 +74,7 @@ def test_notice_of_edge_targets_contract_entity_iri():
 
 
 def test_awarded_edges_attach_to_contract_entity_not_notice():
-    notice, contract = render_upsert_contract(_new_model_payload())
+    notice, contract, _chain = render_upsert_contract(_new_model_payload())
     notice_types = {r[0] for r in (notice.extra_relationships or [])}
     assert notice_types == {"NOTICE_OF"}
     rels = {r[0]: r for r in (contract.extra_relationships or [])}
@@ -86,7 +87,7 @@ def test_awarded_edges_attach_to_contract_entity_not_notice():
 def test_modification_notice_kind_derived_from_notice_type():
     """Events without producer-stamped notice_kind derive it the way
     project_contracts' relabel phase did (can-modif => modification)."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         notice_kind=None, notice_type="can-modif", value_eur=1200.0,
     ))
     assert notice.set_props["notice_kind"] == "modification"
@@ -100,7 +101,7 @@ def test_modification_notice_kind_derived_from_notice_type():
 def test_red_flags_land_on_contract_entity_too():
     """contract_red_flags is recomputed per notice; the flags must reach
     the display entity, not just the Notice."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         tenders_received=1, procedure_type="neg-wo-call",
         award_criterion_type="price",
     ))
@@ -113,7 +114,7 @@ def test_red_flags_land_on_contract_entity_too():
 
 
 def test_parties_winner_gets_awarded_to_with_props():
-    _, contract = render_upsert_contract(_new_model_payload(parties=[{
+    _, contract, _ = render_upsert_contract(_new_model_payload(parties=[{
         "company_gmr_id": "co-1", "name": "Acme", "role": "winner",
         "rank": 1, "is_consortium_member": False,
         "match_tier": "lei", "match_confidence": 1.0, "match_layer": 2,
@@ -134,7 +135,7 @@ def test_parties_winner_gets_awarded_to_with_props():
 
 def test_parties_named_tenderer_gets_bid_on_company_to_contract():
     """BID_ON is a named losing bidder — Company->Contract."""
-    _, contract = render_upsert_contract(_new_model_payload(parties=[{
+    _, contract, _ = render_upsert_contract(_new_model_payload(parties=[{
         "company_gmr_id": "co-9", "name": "Loser Ltd",
         "role": "named_tenderer", "match_tier": "name_country",
         "match_confidence": 0.95, "match_layer": 2,
@@ -151,7 +152,7 @@ def test_consortium_members_carry_shared_party_props_no_summing():
     """Consortium members share one undivided value: the sink carries
     is_consortium_member / tendering_party_id verbatim on each edge and
     performs no value arithmetic."""
-    _, contract = render_upsert_contract(_new_model_payload(
+    _, contract, _ = render_upsert_contract(_new_model_payload(
         company_gmr_id=None,
         parties=[
             {"company_gmr_id": "co-a", "name": "A", "role": "winner",
@@ -288,7 +289,7 @@ def test_keyed_modification_native_path_never_labels_contract_modif():
     the native path: a :Notice keeps notice_type='can-modif', the entity
     is updated via the high-water guard, and the :Contract entity never
     carries notice_type — so it can never be a :Contract{can-modif}."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         ted_notice_id="uuid-mod-2", notice_kind="modification",
         notice_type="can-modif", publication_date="2026-06-01",
         value_eur=3300.0,
@@ -430,7 +431,7 @@ def test_quarantined_new_model_notice_clears_entity_values_guarded():
     """A quarantined canonical notice strips the entity's monetary
     fields via guarded nulls (SET += removes null-valued keys) — a
     stale quarantined notice behind the high-water mark cannot."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         value_eur=1.8e14, estimated_value_eur=2.0e14,
         value_quarantined=True,
         value_quarantine_reason="implausible_magnitude",
@@ -449,7 +450,7 @@ def test_healthy_reemit_clears_stale_marker_on_entity_and_notice():
     and the :Contract entity (guarded null) while keeping the value —
     the fix for values.quarantined_carries_no_value on a contract whose
     latest emit is healthy but was quarantined by an earlier backfill."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         value_eur=367977.2, value_quality_flag="ok",
     ))
     assert notice.set_props["value_eur"] == 367977.2
@@ -467,7 +468,7 @@ def test_no_awarded_value_clears_negative_on_entity_guarded():
     """no_awarded_value on the canonical notice must clear a prior
     (sign-flipped, negative) award value off the entity via guarded
     nulls — values.contract_value_nonneg."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         value_eur=None, value_original=None,
         value_quality_flag="no_awarded_value",
     ))
@@ -480,7 +481,7 @@ def test_no_awarded_value_clears_negative_on_entity_guarded():
 def test_nonpositive_tenders_cleared_on_entity_and_notice():
     """A 0 bidder count is dropped from both writes and REMOVEd from the
     node — values.contract_bidder_count_positive."""
-    notice, contract = render_upsert_contract(_new_model_payload(
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
         tenders_received=0, value_quality_flag="ok",
     ))
     assert "tenders_received" not in notice.set_props
@@ -506,8 +507,86 @@ def test_unwind_merge_clears_stub_on_real_arrival():
 def test_explicit_null_current_value_falls_back_to_value_eur():
     """Producers may serialise current_value: null on a full emit; the
     entity's collapsed figure then falls back to the notice value."""
-    _, contract = render_upsert_contract(_new_model_payload(
+    _, contract, _ = render_upsert_contract(_new_model_payload(
         current_value=None,
     ))
     assert contract.set_props["current_value"] == 1000.0
     assert contract.set_props["value_eur"] == 1000.0
+
+
+# ── contract chain (native linking + adoption) ─────────────────────
+
+
+def test_native_emit_carries_a_chain_write_with_both_back_link_forms():
+    _, _, chain = render_upsert_contract(_new_model_payload(
+        notice_kind="modification", notice_type="can-modif",
+        notice_version="02",
+        modifies_publication_number="549184-2020",
+    ))
+    assert chain.label == "_ContractChain"
+    assert chain.primary_key == {"ted_notice_id": "uuid-award-1"}
+    assert chain.set_props == {"modifies_notice_id": None,
+                               "modifies_publication_number": "549184-2020"}
+
+
+def test_identity_stamps_stay_on_the_notice_not_the_entity():
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        notice_version="02", modifies_notice_id="uuid-prev",
+        legacy_procedure_id="EKR001152382021",
+    ))
+    assert notice.set_props["notice_version"] == "02"
+    assert notice.set_props["modifies_notice_id"] == "uuid-prev"
+    assert notice.set_props["legacy_procedure_id"] == "EKR001152382021"
+    assert "notice_version" not in contract.set_props
+    assert "modifies_notice_id" not in contract.set_props
+    # the authority's file reference is queryable on the entity too
+    assert contract.set_props["legacy_procedure_id"] == "EKR001152382021"
+
+
+def test_chain_step_runs_after_notice_of_and_before_typed_relationships():
+    """Link → adopt → roll up, once per batch, after the NOTICE_OF edges
+    exist (the adopt step walks them) and before UpsertRelationship
+    writes (a legacy MODIFIES event must see the final entity)."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([
+        _contract_event(_new_model_payload()),
+        _contract_event(_new_model_payload(
+            ted_notice_id="uuid-mod-1", notice_kind="modification",
+            modifies_notice_id="uuid-award-1", publication_date="2026-04-01",
+        ), seq=2),
+    ])
+    queries = [q for q, _ in calls]
+    notice_of = next(i for i, q in enumerate(queries) if "[r:NOTICE_OF]" in q)
+    link = next(i for i, q in enumerate(queries) if "MERGE (n)-[:MODIFIES]->(p)" in q)
+    adopt = next(i for i, q in enumerate(queries) if "apoc.refactor.mergeNodes" in q)
+    rollup = next(i for i, q in enumerate(queries) if "SET e.award_ingested" in q)
+    assert notice_of < link < adopt < rollup
+    # one UNWIND per step for the whole batch, rows in seq order
+    rows = calls[link][1]["rows"]
+    assert rows == [
+        {"nid": "uuid-award-1", "prev_nid": None, "prev_pub": None},
+        {"nid": "uuid-mod-1", "prev_nid": "uuid-award-1", "prev_pub": None},
+    ]
+    assert calls[adopt][1]["rows"] == rows
+    assert calls[rollup][1]["rows"] == rows
+    # the chain write never becomes a node MERGE
+    assert not any("_ContractChain" in q for q in queries)
+
+
+def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
+    """Both back-link forms are separate OPTIONAL MATCHes on their own
+    indexed property; an OR across two properties would label-scan
+    every :Notice (see the Neo4j OR-disjunction note)."""
+    link = chain_mod.CHAIN_LINK_CYPHER
+    assert "OPTIONAL MATCH (p1:Notice { ted_notice_id: row.prev_nid })" in link
+    assert ("OPTIONAL MATCH (p2:Notice { ted_publication_number: row.prev_pub })"
+            in link)
+    assert " OR " not in link
+    adopt = chain_mod.CHAIN_ADOPT_CYPHER
+    # the root's entity is the one under its currently stamped key
+    assert ("MATCH (root)-[:NOTICE_OF]->(e:Contract "
+            "{ contract_key: root.contract_key })" in adopt)
+    assert "{properties: 'discard', mergeRels: true}" in adopt
+    rollup = chain_mod.CHAIN_ROLLUP_CYPHER
+    assert "SET x.is_current = (x = latest)" in rollup
+    assert "x.contract_key = e.contract_key" in rollup

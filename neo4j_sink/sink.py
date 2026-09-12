@@ -23,6 +23,7 @@ from fontem_events import EventConsumer
 from neo4j import GraphDatabase
 from neo4j import exceptions as neo4j_exceptions
 
+from .chain import apply_contract_chains
 from .cypher import RENDERERS, CypherWrite, label_for_graph
 
 logger = logging.getLogger(__name__)
@@ -374,10 +375,15 @@ class Neo4jSink(EventConsumer):
         same_as = [w for w in writes if w.label == "_SameAs"]
         not_same_as = [w for w in writes if w.label == "_NotSameAs"]
         typed_rels = [w for w in writes if w.label == "_Relationship"]
+        chains = [w for w in writes if w.label == "_ContractChain"]
         nodes = [w for w in writes
-                 if w.label not in ("_SameAs", "_NotSameAs", "_Relationship")]
+                 if w.label not in ("_SameAs", "_NotSameAs", "_Relationship",
+                                    "_ContractChain")]
         rel_items = self._flush_nodes(nodes)
         self._flush_extra_relationships(rel_items)
+        # After the NOTICE_OF edges: the chain step needs the notice, its
+        # entity and that edge in place.
+        self._apply_contract_chains(chains)
         self._flush_typed_relationships(typed_rels)
         # SameAs before NotSameAs: within one batch a retraction must be
         # able to delete an assertion made earlier in the same batch, and
@@ -651,9 +657,16 @@ class Neo4jSink(EventConsumer):
             with self._driver.session() as session:
                 session.run(cypher, rows=rows)
 
+    def _apply_contract_chains(self, writes: list[CypherWrite]) -> None:
+        """Link → adopt → roll up (see neo4j_sink.chain)."""
+        apply_contract_chains(self._driver, writes)
+
     def _apply_one(self, w: CypherWrite) -> None:
         """Per-event MERGE for events delivered outside a
         bracket (consolidator outputs, etc.)."""
+        if w.label == "_ContractChain":
+            self._apply_contract_chains([w])
+            return
         if w.label == "_SameAs":
             self._apply_same_as(w)
             return
