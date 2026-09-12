@@ -126,10 +126,10 @@ jobs:
           # Only auto-bump non-prod (testing/staging share infra/staging.yaml).
           # Prod stays manual; the user bumps infra/prod.yaml when ready.
           sed -i -E "s|(image: contribute\.void42\.internal/fontem/fontem-neo4j-sink:)[^\"[:space:]]+|\1${TAG}|" \
-            infra/staging.yaml || true
+            infra/shared.yaml || true
           git config user.name "Fontem CI"
           git config user.email "ci@void42.internal"
-          git add infra/staging.yaml
+          git add infra/shared.yaml
           git diff --cached --quiet && { echo "No-op bump (already at $TAG)"; exit 0; }
-          git commit -m "ci: deploy fontem-neo4j-sink ${TAG} to testing+staging [skip ci]"
+          git commit -m "ci: deploy fontem-neo4j-sink ${TAG} to fontem-shared [skip ci]"
           git push origin main
