@@ -293,3 +293,37 @@ def test_replay_converges(sink, neo4j):
     sink.handle(events)
     sink.handle(_events(M2, _award(), M1))
     assert _state(driver) == first
+
+
+def test_wrong_back_link_never_merges_two_contracts(sink, neo4j):
+    """The hazard found in prod on 2026-09-13: a modification keyed by
+    its own procedure whose back-link names ANOTHER contract's award.
+    Both contracts keep their entities (the modification links to the
+    award it named, and the split meter reports it); the other
+    contract's award, modifications and edges stay where they were."""
+    _, driver = neo4j
+    award_a = _award()  # P1
+    award_b = _award(ted_notice_id="B", ted_publication_number="900-2026",
+                     contract_key="P2", procedure_id="P2",
+                     publication_date="2026-02-01", value_eur=5000.0,
+                     company_gmr_id="co-2")
+    mod_b = _mod("MB", contract_key="P2", procedure_id="P2",
+                 modifies_notice_id="B", publication_date="2026-04-01",
+                 value_eur=5500.0, company_gmr_id="co-2")
+    stray = _mod("MX", contract_key="P2", procedure_id="P2",
+                 modifies_notice_id="A",  # names contract A's award by mistake
+                 publication_date="2026-05-01", value_eur=6000.0,
+                 company_gmr_id="co-2")
+    sink.handle(_events(award_a, award_b, mod_b, stray))
+    state = _state(driver)
+    assert sorted(state["entities"]) == ["P1", "P2"]
+    assert state["modifies"] == [("MB", "B"), ("MX", "A")]
+    assert state["notices"]["B"]["entities"] == ["P2"]
+    assert state["notices"]["MB"]["entities"] == ["P2"]
+    assert state["notices"]["MX"]["entities"] == ["P2"]
+    assert state["entities"]["P1"]["notice_count"] == 1
+    assert state["entities"]["P2"]["notice_count"] == 3
+    assert state["entities"]["P2"]["current_value"] == 6000.0
+    # the same events, all in one batch or replayed, converge the same way
+    sink.handle(_events(stray, award_a, mod_b, award_b))
+    assert _state(driver) == state

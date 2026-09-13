@@ -35,21 +35,30 @@ CHAIN_LINK_CYPHER = (
     "WITH n, by_id + by_pub AS succ "
     "FOREACH (s IN [x IN succ WHERE x <> n] | MERGE (s)-[:MODIFIES]->(n))"
 )
-# 2. Adopt. The chain is everything reachable over MODIFIES. Its
-#    root is the earliest award, or the earliest notice when no
-#    award has been ingested. Every other :Contract entity the
-#    chain's notices point at is folded INTO the root's entity
-#    (apoc.refactor.mergeNodes keeps the root's properties and
-#    moves the edges — NOTICE_OF, AWARDED, AWARDED_TO, BID_ON — so a
-#    split contract becomes one without losing an edge). The root's
-#    entity is the one keyed by the root's own stamped contract_key:
-#    a notice re-stamped with a new key briefly has two NOTICE_OF
-#    edges, and the newly stamped identity must win.
+# 2. Adopt. The chain is everything reachable over MODIFIES. Its root
+#    is the earliest award, or the earliest notice when no award has
+#    been ingested. Every other :Contract entity the chain's notices
+#    point at is folded INTO the root's entity — but only an entity that
+#    has no award of its own outside this chain. A modification whose
+#    back-link names another contract's award (a buyer's typo, a wrong
+#    reference) must not drag that whole contract into this one: both
+#    stay, and the split meter reports it. An entity whose awards are
+#    all in the chain (the same award re-stamped under a new key, or a
+#    modification-only entity) is folded in with apoc.refactor.mergeNodes,
+#    which keeps the root's properties and moves the edges — NOTICE_OF,
+#    AWARDED, AWARDED_TO, BID_ON — so nothing is lost. The root's entity
+#    is the one keyed by the root's own stamped contract_key: a notice
+#    re-stamped with a new key briefly has two NOTICE_OF edges, and the
+#    newly stamped identity must win.
+#
+#    One notice per statement, not an UNWIND over the batch: a merge
+#    deletes a node, and a later row of the same statement that had
+#    already resolved that node (its chain shares an entity through
+#    NOTICE_OF but not through MODIFIES) fails with "Node not found".
 CHAIN_ADOPT_CYPHER = (
-    "UNWIND $rows AS row "
-    "MATCH (n:Notice { ted_notice_id: row.nid }) "
+    "MATCH (n:Notice { ted_notice_id: $nid }) "
     "MATCH (n)-[:MODIFIES*0..30]-(x:Notice) "
-    "WITH n, collect(DISTINCT x) AS chain "
+    "WITH collect(DISTINCT x) AS chain "
     "WITH chain, [x IN chain WHERE x.notice_kind = 'award'] AS awards "
     "WITH chain, CASE WHEN size(awards) > 0 THEN awards ELSE chain END AS cands "
     "UNWIND cands AS c "
@@ -57,8 +66,10 @@ CHAIN_ADOPT_CYPHER = (
     "WITH chain, head(collect(c)) AS root "
     "MATCH (root)-[:NOTICE_OF]->(e:Contract { contract_key: root.contract_key }) "
     "UNWIND chain AS x "
-    "OPTIONAL MATCH (x)-[:NOTICE_OF]->(o:Contract) WHERE o <> e "
-    "WITH DISTINCT e, o WHERE o IS NOT NULL "
+    "MATCH (x)-[:NOTICE_OF]->(o:Contract) WHERE o <> e "
+    "AND NOT EXISTS { (o)<-[:NOTICE_OF]-(a:Notice { notice_kind: 'award' }) "
+    "WHERE NOT a IN chain } "
+    "WITH DISTINCT e, o "
     "CALL apoc.refactor.mergeNodes([e, o], "
     "{properties: 'discard', mergeRels: true}) YIELD node "
     "RETURN count(node) AS merged"
@@ -93,8 +104,9 @@ CHAIN_ROLLUP_CYPHER = (
 )
 
 def apply_contract_chains(driver, writes: list[CypherWrite]) -> None:
-    """Link → adopt → roll up, one UNWIND per step for the batch.
-    Each step is idempotent, so a redelivered batch converges."""
+    """Link → adopt → roll up. Link and roll-up are one UNWIND per
+    batch; adopt runs per notice (see CHAIN_ADOPT_CYPHER). Each step is
+    idempotent, so a redelivered batch converges."""
     if not writes:
         return
     rows = [{
@@ -104,5 +116,6 @@ def apply_contract_chains(driver, writes: list[CypherWrite]) -> None:
     } for w in writes]
     with driver.session() as session:
         session.run(CHAIN_LINK_CYPHER, rows=rows)
-        session.run(CHAIN_ADOPT_CYPHER, rows=rows)
+        for row in rows:
+            session.run(CHAIN_ADOPT_CYPHER, nid=row["nid"])
         session.run(CHAIN_ROLLUP_CYPHER, rows=rows)

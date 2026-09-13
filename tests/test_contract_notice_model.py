@@ -567,7 +567,10 @@ def test_chain_step_runs_after_notice_of_and_before_typed_relationships():
         {"nid": "uuid-award-1", "prev_nid": None, "prev_pub": None},
         {"nid": "uuid-mod-1", "prev_nid": "uuid-award-1", "prev_pub": None},
     ]
-    assert calls[adopt][1]["rows"] == rows
+    # adopt runs once per notice (a merge deletes a node a later UNWIND
+    # row may already hold); link and roll-up once per batch
+    adopts = [c for c in calls if "apoc.refactor.mergeNodes" in c[0]]
+    assert [c[1]["nid"] for c in adopts] == ["uuid-award-1", "uuid-mod-1"]
     assert calls[rollup][1]["rows"] == rows
     # the chain write never becomes a node MERGE
     assert not any("_ContractChain" in q for q in queries)
@@ -587,6 +590,10 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     assert ("MATCH (root)-[:NOTICE_OF]->(e:Contract "
             "{ contract_key: root.contract_key })" in adopt)
     assert "{properties: 'discard', mergeRels: true}" in adopt
+    # never fold in an entity that has an award of its own outside the chain
+    assert ("NOT EXISTS { (o)<-[:NOTICE_OF]-(a:Notice { notice_kind: 'award' }) "
+            "WHERE NOT a IN chain }" in adopt)
+    assert "UNWIND $rows" not in adopt
     rollup = chain_mod.CHAIN_ROLLUP_CYPHER
     assert "SET x.is_current = (x = latest)" in rollup
     assert "x.contract_key = e.contract_key" in rollup
