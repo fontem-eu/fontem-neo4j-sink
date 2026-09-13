@@ -152,9 +152,7 @@ class Neo4jSink(EventConsumer):
         """Route each write into the open bracket whose label matches
         it, or into the non-bracketed pending batch."""
         for write in writes:
-            target = cls._find_open_bracket(
-                bracket_writes, bracket_label, write.label,
-            )
+            target = cls._find_open_bracket(bracket_label, write.label)
             if target is not None:
                 bracket_writes[target].append(write)
             else:
@@ -162,15 +160,19 @@ class Neo4jSink(EventConsumer):
 
     @staticmethod
     def _find_open_bracket(
-        writes: dict[str, list[CypherWrite]],
         labels: dict[str, str],
         target_label: str,
     ) -> str | None:
+        # Only a bracket whose label matches. The old "exactly one bracket
+        # open -> route everything into it" fallback pulled every write of
+        # every other label into a graph replace: on 2026-09-13 the daily
+        # sanctions replace swallowed the contract writes of six running
+        # loaders, keyed its UNWIND on the first (contract) row's key,
+        # DETACH-DELETEd every :SanctionedEntity and then failed the MERGE
+        # — prod kept 212 of 5,994 sanctioned entities.
         candidates = [g for g, lbl in labels.items() if lbl == target_label]
         if len(candidates) == 1:
             return candidates[0]
-        if len(writes) == 1:
-            return next(iter(writes))
         return None
 
     # ── Entity kind (:Company vs :InvestmentFund) ─────────────────

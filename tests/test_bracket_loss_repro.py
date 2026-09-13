@@ -418,3 +418,27 @@ def test_directional_edges_keep_orientation_when_batched():
     awarded_to = [q for q in rel_queries if "[r:AWARDED_TO]" in q]
     assert awarded and "MERGE (t)-[r:AWARDED]->(s)" in awarded[0]
     assert awarded_to and "MERGE (s)-[r:AWARDED_TO]->(t)" in awarded_to[0]
+
+
+
+def test_open_bracket_only_takes_writes_of_its_own_label():
+    """A :SanctionedEntity graph replace must not swallow contract writes
+    that happen to arrive while it is open. Before the fix the lone open
+    bracket took every write; its flush then keyed the UNWIND on the
+    first row's key (ted_notice_id), deleted every sanctioned entity and
+    failed the MERGE with 'null property value for ted_notice_id'."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([
+        _ev("BeginGraphReplace", {"graph_iri": "http://data.fontem.eu/graph/sanctions",
+                                  "label": "SanctionedEntity"}, 1),
+        _ev("UpsertContract", {
+            "ted_notice_id": "uuid-award-1", "contract_key": "P1",
+            "notice_kind": "award", "title": "Bridge", "value_eur": 1.0,
+        }, 2),
+    ])
+    bracket = sink._bracket_writes["http://data.fontem.eu/graph/sanctions"]
+    assert bracket == []  # nothing of another label went in
+    # the contract writes were applied straight away, outside the bracket
+    assert any("MERGE (n:Notice" in q for q, _ in calls)
+    assert any("MERGE (n:Contract" in q for q, _ in calls)
+    assert not any("DETACH DELETE" in q for q, _ in calls)
