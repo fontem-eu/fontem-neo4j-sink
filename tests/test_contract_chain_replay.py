@@ -335,3 +335,112 @@ def test_wrong_back_link_never_merges_two_contracts(sink, neo4j):
     # the same events, all in one batch or replayed, converge the same way
     sink.handle(_events(stray, award_a, mod_b, award_b))
     assert _state(driver) == state
+
+
+# ── a back-link is judged before it may link ──────────────────────
+
+
+def _german_award():
+    return _award(ted_notice_id="DE-A", ted_publication_number="375716-2020",
+                  contract_key="375716-2020", publication_date="2020-08-10",
+                  title="VP 71, Bauleistungen ESTW Angersdorf", country="DEU",
+                  authority_id="db-netz", company_gmr_id="glass", value_eur=9000.0,
+                  procedure_id=None, notice_version=None)
+
+
+def _german_mod(nid="DE-M", pub="37303-2022"):
+    return _mod(nid, ted_publication_number=pub, contract_key="375716-2020",
+                modifies_publication_number="375716-2020", procedure_id=None,
+                publication_date="2022-01-20", country="DEU", value_eur=9500.0,
+                title="VP 71, Bauleistungen ESTW Angersdorf Nachtrag",
+                authority_id="db-netz", company_gmr_id="glass")
+
+
+def _bulgarian_award():
+    return _award(ted_notice_id="BG-A", ted_publication_number="260030-2022",
+                  contract_key="BGPROC", procedure_id="BGPROC", country="BGR",
+                  publication_date="2022-05-16", value_eur=50.0,
+                  title="Абонаментно сервизно обслужване на асансьори",
+                  authority_id="unwe", company_gmr_id="alfalift")
+
+
+def _bulgarian_mod_with_the_typo():
+    """81781-2024: says it modifies 37303-2022 — a DB Netz notice."""
+    return _mod("BG-M", ted_publication_number="81781-2024", country="BGR",
+                contract_key="BGPROC", procedure_id="BGPROC",
+                modifies_publication_number="37303-2022",
+                publication_date="2024-02-08", value_eur=60.0,
+                title="Абонаментно сервизно обслужване на асансьори",
+                authority_id="unwe", company_gmr_id="alfalift")
+
+
+def _assert_two_separate_contracts(state):
+    assert sorted(state["entities"]) == ["375716-2020", "BGPROC"]
+    assert state["modifies"] == [("DE-M", "DE-A")]
+    by_entity = {nid: n["entities"] for nid, n in state["notices"].items()}
+    assert by_entity == {"DE-A": ["375716-2020"], "DE-M": ["375716-2020"],
+                         "BG-A": ["BGPROC"], "BG-M": ["BGPROC"]}
+    assert state["edges"] == [
+        ("AWARDED", "375716-2020", "db-netz"), ("AWARDED", "BGPROC", "unwe"),
+        ("AWARDED_TO", "375716-2020", "glass"), ("AWARDED_TO", "BGPROC", "alfalift"),
+    ]
+    assert state["entities"]["375716-2020"]["current_value"] == 9500.0
+    assert state["entities"]["BGPROC"]["current_value"] == 60.0
+
+
+def test_a_typo_in_a_back_link_does_not_fuse_two_contracts(sink, neo4j):
+    _, driver = neo4j
+    sink.handle(_events(_german_award(), _german_mod(), _bulgarian_award(),
+                        _bulgarian_mod_with_the_typo()))
+    _assert_two_separate_contracts(_state(driver))
+    with driver.session() as s:
+        row = s.run("MATCH (n:Notice {ted_notice_id: 'BG-M'}) RETURN "
+                    "n.back_link_status AS status, n.back_link_reason AS reason, "
+                    "n.buyer_id AS buyer, n.winner_ids AS winners").single()
+    assert row["status"] == "rejected"
+    assert "BGR is not DEU" in row["reason"]
+    assert row["buyer"] == "unwe" and row["winners"] == ["alfalift"]
+
+
+def test_the_typo_is_refused_in_the_reverse_direction_too(sink, neo4j):
+    """The wrong target arrives LAST, so the link is proposed by the
+    reverse lookup (notices whose back-link names the new notice)."""
+    _, driver = neo4j
+    sink.handle(_events(_bulgarian_award(), _bulgarian_mod_with_the_typo(),
+                        _german_award()))
+    sink.handle(_events(_german_mod(), start=4))
+    _assert_two_separate_contracts(_state(driver))
+
+
+def test_a_refused_link_removes_the_edge_an_older_sink_wrote(sink, neo4j):
+    _, driver = neo4j
+    sink.handle(_events(_german_award(), _german_mod(), _bulgarian_award()))
+    with driver.session() as s:
+        s.run("MERGE (n:Notice {ted_notice_id: 'BG-M'}) WITH n "
+              "MATCH (t:Notice {ted_notice_id: 'DE-M'}) MERGE (n)-[:MODIFIES]->(t)")
+    sink.handle(_events(_bulgarian_mod_with_the_typo(), start=4))
+    assert _state(driver)["modifies"] == [("DE-M", "DE-A")]
+
+
+def test_nothing_in_common_in_one_country_links_but_is_marked(sink, neo4j):
+    _, driver = neo4j
+    award = _german_award()
+    mod = _german_mod()
+    mod.update(authority_id="another-authority", company_gmr_id="another-firm",
+               title="Ersatzneubau Sporthalle Illingen")
+    sink.handle(_events(award, mod))
+    state = _state(driver)
+    assert state["modifies"] == [("DE-M", "DE-A")]
+    with driver.session() as s:
+        status = s.run("MATCH (n:Notice {ted_notice_id: 'DE-M'}) "
+                       "RETURN n.back_link_status AS s").single()["s"]
+    assert status == "doubtful"
+
+
+def test_an_ordinary_link_carries_no_marker(sink, neo4j):
+    _, driver = neo4j
+    sink.handle(_events(_award(), M1))
+    with driver.session() as s:
+        row = s.run("MATCH (n:Notice {ted_notice_id: 'M1'}) RETURN "
+                    "n.back_link_status AS s, n.back_link_reason AS r").single()
+    assert row["s"] is None and row["r"] is None

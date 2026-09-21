@@ -426,6 +426,31 @@ def _value_withheld(clears: "list[str] | None") -> bool:
     return bool(clears) and "value_eur" in clears
 
 
+def notice_parties(p: dict) -> dict:
+    """Who THIS notice names as buyer and contractor(s), kept on the
+    :Notice itself.
+
+    The AWARDED / AWARDED_TO edges hang off the :Contract entity, which
+    every notice of a chain shares — so once notices are on one entity
+    the graph no longer says which notice named which buyer. The chain
+    step needs exactly that to judge a back-link (see plausibility.py),
+    and a wrongly fused entity can only be taken apart again if each
+    notice still knows its own parties."""
+    winners = [x for x in p.get("parties") or () if x.get("role") == "winner"]
+    ids = [x["company_gmr_id"] for x in winners if x.get("company_gmr_id")]
+    if p.get("company_gmr_id") and p["company_gmr_id"] not in ids:
+        ids.append(p["company_gmr_id"])
+    names = [x["name"] for x in winners if x.get("name")]
+    out = {}
+    if p.get("authority_id"):
+        out["buyer_id"] = p["authority_id"]
+    if ids:
+        out["winner_ids"] = ids
+    if names:
+        out["winner_names"] = names
+    return out
+
+
 def _render_notice(p: dict) -> CypherWrite:
     """The per-notice provenance node. Carries everything the notice
     published (incl. the recomputed integrity red flags — their inputs
@@ -437,6 +462,7 @@ def _render_notice(p: dict) -> CypherWrite:
     set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
     set_props["notice_kind"] = _notice_kind(p)
     set_props["contract_key"] = p["contract_key"]
+    set_props.update(notice_parties(p))
     set_props.update(contract_red_flags(p))
     clear = _contract_clears(p)
     if clear:
