@@ -10,30 +10,85 @@ the NOTICE_OF edges (see Neo4jSink._apply_batch).
 """
 from __future__ import annotations
 
+import logging
+
+from .plausibility import DOUBTFUL, OK, REJECT, assess_link
 from .writes import CypherWrite
+
+logger = logging.getLogger(__name__)
+
+# What a verdict leaves on the modifying notice (back_link_status).
+_STATUS_ON_NOTICE = {OK: None, DOUBTFUL: "doubtful", REJECT: "rejected"}
 
 # 1. Link. The notice's back-link resolves to the previous notice by
 #    notice id or by publication number (two indexed seeks, not an
 #    OR-disjunction). Then the reverse direction: notices already in
 #    the graph whose back-link names THIS notice (a late award, or a
-#    late middle notice) are linked too. A `{prop: null}` pattern
-#    never matches, so absent back-links cost nothing.
-CHAIN_LINK_CYPHER = (
+#    late middle notice). A `{prop: null}` pattern never matches, so
+#    absent back-links cost nothing.
+#
+#    Resolving is not linking. The number in a back-link is typed by
+#    the buyer and is sometimes wrong, and a MODIFIES edge is what lets
+#    the adopt step fold two entities into one — so every candidate is
+#    judged first (plausibility.assess_link) on what the two notices
+#    themselves say: procedure, buyer, contractor, title, country. The
+#    query only gathers those facts; the verdict is Python's, so the
+#    rule has one home and unit tests that need no database.
+#
+#    A notice written before parties were stamped on notices
+#    (cypher.notice_parties) has no buyer_id of its own; the parties of
+#    the entity it sits on stand in. On a wrongly fused entity that set
+#    is polluted, which can only make a link look MORE plausible —
+#    repair_chains judges such entities from the event log instead.
+def _facts(var: str) -> str:
+    return (
+        f"{var} {{ nid: {var}.ted_notice_id, .procedure_id, "
+        f".legacy_procedure_id, .title, .country, "
+        f"winner_names: coalesce({var}.winner_names, []), "
+        f"buyer_ids: CASE WHEN {var}.buyer_id IS NOT NULL THEN [{var}.buyer_id] "
+        f"ELSE [({var})-[:NOTICE_OF]->(:Contract)<-[:AWARDED]-(a:Authority) "
+        f"| a.authority_id] END, "
+        f"winner_ids: coalesce({var}.winner_ids, "
+        f"[({var})-[:NOTICE_OF]->(:Contract)-[:AWARDED_TO]->(c:Company) "
+        f"| c.gmr_id]) }}"
+    )
+
+
+CHAIN_CANDIDATES_CYPHER = (
     "UNWIND $rows AS row "
     "MATCH (n:Notice { ted_notice_id: row.nid }) "
     "OPTIONAL MATCH (p1:Notice { ted_notice_id: row.prev_nid }) "
     "OPTIONAL MATCH (p2:Notice { ted_publication_number: row.prev_pub }) "
     "WITH n, coalesce(p1, p2) AS p "
-    "FOREACH (_ IN CASE WHEN p IS NOT NULL AND p <> n THEN [1] ELSE [] END | "
-    "MERGE (n)-[:MODIFIES]->(p)) "
-    "WITH n "
     "OPTIONAL MATCH (s1:Notice { modifies_notice_id: n.ted_notice_id }) "
-    "WITH n, collect(s1) AS by_id "
+    "WITH n, p, collect(s1) AS by_id "
     "OPTIONAL MATCH (s2:Notice { modifies_publication_number: "
     "n.ted_publication_number }) "
-    "WITH n, by_id, collect(s2) AS by_pub "
-    "WITH n, by_id + by_pub AS succ "
-    "FOREACH (s IN [x IN succ WHERE x <> n] | MERGE (s)-[:MODIFIES]->(n))"
+    "WITH n, p, by_id, collect(s2) AS by_pub "
+    "WITH n, p, by_id + by_pub AS succ "
+    f"RETURN {_facts('n')} AS notice, "
+    f"CASE WHEN p IS NOT NULL AND p <> n THEN {_facts('p')} END AS target, "
+    f"[s IN succ WHERE s <> n | {_facts('s')}] AS successors"
+)
+# `status` is null for an ordinary link, so the two properties exist
+# only on the few notices that need a second look.
+CHAIN_LINK_CYPHER = (
+    "UNWIND $links AS l "
+    "MATCH (m:Notice { ted_notice_id: l.m }) "
+    "MATCH (t:Notice { ted_notice_id: l.t }) "
+    "MERGE (m)-[:MODIFIES]->(t) "
+    "SET m.back_link_status = l.status, m.back_link_reason = l.reason"
+)
+# A rejected link also removes an edge an earlier version of the sink
+# may have written. That stops the chain from growing through it; an
+# entity it already fused is taken apart by repair_chains.
+CHAIN_REJECT_CYPHER = (
+    "UNWIND $links AS l "
+    "MATCH (m:Notice { ted_notice_id: l.m }) "
+    "SET m.back_link_status = l.status, m.back_link_reason = l.reason "
+    "WITH m, l "
+    "MATCH (m)-[r:MODIFIES]->(:Notice { ted_notice_id: l.t }) "
+    "DELETE r"
 )
 # 2. Adopt. The chain is everything reachable over MODIFIES. Its root
 #    is the earliest award, or the earliest notice when no award has
@@ -103,9 +158,44 @@ CHAIN_ROLLUP_CYPHER = (
     "x.contract_key = e.contract_key)"
 )
 
+def judge_candidates(records) -> tuple[list[dict], list[dict]]:
+    """(links to write, links to refuse) from CHAIN_CANDIDATES_CYPHER
+    rows. Each is {m, t, status, reason} — m modifies t."""
+    links: dict[tuple[str, str], dict] = {}
+    for rec in records:
+        notice = rec["notice"]
+        pairs = [(s, notice) for s in rec["successors"]]
+        if rec["target"] is not None:
+            pairs.append((notice, rec["target"]))
+        for m, t in pairs:
+            verdict = assess_link(m, t)
+            status = _STATUS_ON_NOTICE[verdict.status]
+            links[(m["nid"], t["nid"])] = {
+                "m": m["nid"], "t": t["nid"], "linkable": verdict.linkable,
+                "status": status,
+                "reason": verdict.reason if status else None,
+            }
+    accepted = [l for l in links.values() if l["linkable"]]
+    refused = [l for l in links.values() if not l["linkable"]]
+    return accepted, refused
+
+
+def link_notices(session, rows: list[dict]) -> None:
+    """Step 1 for a batch: gather, judge, write."""
+    records = [r.data() for r in session.run(CHAIN_CANDIDATES_CYPHER, rows=rows)]
+    accepted, refused = judge_candidates(records)
+    if accepted:
+        session.run(CHAIN_LINK_CYPHER, links=accepted)
+    if refused:
+        for l in refused:
+            logger.warning("back-link refused: %s -> %s (%s)",
+                           l["m"], l["t"], l["reason"])
+        session.run(CHAIN_REJECT_CYPHER, links=refused)
+
+
 def apply_contract_chains(driver, writes: list[CypherWrite]) -> None:
-    """Link → adopt → roll up. Link and roll-up are one UNWIND per
-    batch; adopt runs per notice (see CHAIN_ADOPT_CYPHER). Each step is
+    """Link → adopt → roll up. Link (gather, judge, write) and roll-up
+    are per batch; adopt runs per notice (see CHAIN_ADOPT_CYPHER). Each step is
     idempotent, so a redelivered batch converges."""
     if not writes:
         return
@@ -115,7 +205,7 @@ def apply_contract_chains(driver, writes: list[CypherWrite]) -> None:
         "prev_pub": w.set_props.get("modifies_publication_number"),
     } for w in writes]
     with driver.session() as session:
-        session.run(CHAIN_LINK_CYPHER, rows=rows)
+        link_notices(session, rows)
         for row in rows:
             session.run(CHAIN_ADOPT_CYPHER, nid=row["nid"])
         session.run(CHAIN_ROLLUP_CYPHER, rows=rows)

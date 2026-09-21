@@ -557,7 +557,9 @@ def test_chain_step_runs_after_notice_of_and_before_typed_relationships():
     ])
     queries = [q for q, _ in calls]
     notice_of = next(i for i, q in enumerate(queries) if "[r:NOTICE_OF]" in q)
-    link = next(i for i, q in enumerate(queries) if "MERGE (n)-[:MODIFIES]->(p)" in q)
+    # the link step opens by gathering each candidate link's facts; what it
+    # then writes depends on the verdicts (none here: the mock graph is empty)
+    link = queries.index(chain_mod.CHAIN_CANDIDATES_CYPHER)
     adopt = next(i for i, q in enumerate(queries) if "apoc.refactor.mergeNodes" in q)
     rollup = next(i for i, q in enumerate(queries) if "SET e.award_ingested" in q)
     assert notice_of < link < adopt < rollup
@@ -580,11 +582,14 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     """Both back-link forms are separate OPTIONAL MATCHes on their own
     indexed property; an OR across two properties would label-scan
     every :Notice (see the Neo4j OR-disjunction note)."""
-    link = chain_mod.CHAIN_LINK_CYPHER
+    link = chain_mod.CHAIN_CANDIDATES_CYPHER
     assert "OPTIONAL MATCH (p1:Notice { ted_notice_id: row.prev_nid })" in link
     assert ("OPTIONAL MATCH (p2:Notice { ted_publication_number: row.prev_pub })"
             in link)
     assert " OR " not in link
+    # resolving a back-link writes nothing: only judged links are merged
+    assert "MERGE" not in link and "SET" not in link
+    assert chain_mod.CHAIN_LINK_CYPHER.startswith("UNWIND $links AS l ")
     adopt = chain_mod.CHAIN_ADOPT_CYPHER
     # the root's entity is the one under its currently stamped key
     assert ("MATCH (root)-[:NOTICE_OF]->(e:Contract "
