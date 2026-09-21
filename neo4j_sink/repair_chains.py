@@ -72,13 +72,16 @@ _EVENTS_SQL = (
 )
 # Entities whose buyers sit in more than one country. Cross-border
 # joint procurement exists, so this nominates; the log decides.
+# Starts from the degree of each entity (read off the relationship
+# store, no expansion) rather than aggregating all ~700k AWARDED edges:
+# the obvious "MATCH the edges, collect the countries" form dies on
+# prod's 1 GiB per-transaction memory limit.
 _SUSPECTS_CYPHER = (
-    "MATCH (a:Authority)-[:AWARDED]->(e:Contract) "
+    "MATCH (e:Contract) WHERE COUNT { (e)<-[:AWARDED]-() } > 1 "
+    "MATCH (a:Authority)-[:AWARDED]->(e) "
     "WITH e, collect(DISTINCT a.country) AS countries "
     "WHERE size([c IN countries WHERE c IS NOT NULL]) > 1 "
-    "RETURN e.contract_key AS key, countries, "
-    "COUNT { (e)<-[:NOTICE_OF]-(:Notice) } AS notices "
-    "ORDER BY notices DESC"
+    "RETURN e.contract_key AS key, countries"
 )
 _NOTICES_CYPHER = (
     "MATCH (n:Notice)-[:NOTICE_OF]->(:Contract { contract_key: $key }) "
