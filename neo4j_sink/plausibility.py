@@ -93,6 +93,27 @@ def _any_name_matches(names_a, names_b) -> bool:
                for a in names_a or () for b in names_b or ())
 
 
+def _shares(notice: dict, target: dict, key: str) -> bool:
+    return bool(set(notice.get(key) or ()) & set(target.get(key) or ()))
+
+
+def _signals(notice: dict, target: dict) -> tuple[str, ...]:
+    """Everything that carries over from ``target`` to ``notice``."""
+    found = []
+    if any(notice.get(k) and notice.get(k) == target.get(k)
+           for k in ("procedure_id", "legacy_procedure_id")):
+        found.append("procedure")
+    if _shares(notice, target, "buyer_ids"):
+        found.append("buyer")
+    if _shares(notice, target, "winner_ids"):
+        found.append("winner")
+    elif _any_name_matches(notice.get("winner_names"), target.get("winner_names")):
+        found.append("winner_name")
+    if _similar(notice.get("title"), target.get("title")) >= _TITLE_MATCH:
+        found.append("title")
+    return tuple(found)
+
+
 def assess_link(notice: dict, target: dict) -> Verdict:
     """Judge ``notice`` -[:MODIFIES]-> ``target``.
 
@@ -100,22 +121,9 @@ def assess_link(notice: dict, target: dict) -> Verdict:
     ``legacy_procedure_id``, ``buyer_ids``, ``winner_ids``,
     ``winner_names``, ``title``, ``country``. Missing or empty means
     unknown, never "different"."""
-    signals = []
-    for key in ("procedure_id", "legacy_procedure_id"):
-        if notice.get(key) and notice.get(key) == target.get(key):
-            signals.append("procedure")
-            break
-    if set(notice.get("buyer_ids") or ()) & set(target.get("buyer_ids") or ()):
-        signals.append("buyer")
-    if set(notice.get("winner_ids") or ()) & set(target.get("winner_ids") or ()):
-        signals.append("winner")
-    elif _any_name_matches(notice.get("winner_names"), target.get("winner_names")):
-        signals.append("winner_name")
-    if _similar(notice.get("title"), target.get("title")) >= _TITLE_MATCH:
-        signals.append("title")
+    signals = _signals(notice, target)
     if signals:
-        return Verdict(OK, tuple(signals))
-
+        return Verdict(OK, signals)
     judgeable = any(
         notice.get(k) and target.get(k)
         for k in ("buyer_ids", "winner_ids", "winner_names", "title")
