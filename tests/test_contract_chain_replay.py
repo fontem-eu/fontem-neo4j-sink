@@ -42,7 +42,15 @@ def _docker_available() -> bool:
 pytestmark = pytest.mark.skipif(not _docker_available(),
                                 reason="needs a reachable Docker daemon")
 
-_IMAGE = os.environ.get("NEO4J_TEST_IMAGE", "neo4j:5-community")
+# Pinned by digest: `5-community` floats, so the same test could run a
+# different Neo4j from one week to the next (Docker Hub re-pushes the
+# tag). This is the image fontem-shared runs.
+# renovate: datasource=docker depName=neo4j
+_DEFAULT_IMAGE = (
+    "neo4j:5.26.30-community"
+    "@sha256:22ec5cd05a8cbb372fc4bed5e384c30bc75fd92504c72be4462039761b105f61"
+)
+_IMAGE = os.environ.get("NEO4J_TEST_IMAGE", _DEFAULT_IMAGE)
 
 _SCHEMA = (
     "CREATE CONSTRAINT contract_contract_key_unique IF NOT EXISTS "
