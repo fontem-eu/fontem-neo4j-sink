@@ -23,7 +23,7 @@
         "/tests/test_contract_chain_replay\\.py$/"
       ],
       "matchStrings": [
-        "neo4j:(?<currentValue>[^@\"\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+        "neo4j:(?<currentValue>[^@\"\\s]+)\"?\\s*\"?@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "depNameTemplate": "neo4j",
       "datasourceTemplate": "docker",
