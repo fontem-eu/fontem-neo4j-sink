@@ -4,6 +4,7 @@ graph side is covered against a real Neo4j in test_repair_chains."""
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import json
 from unittest import mock
 
 import pytest
@@ -143,7 +144,7 @@ def test_a_pre_native_notice_is_keyed_the_way_the_ingest_path_keys_it_today():
 
 def test_a_payload_stored_as_text_is_parsed():
     log = FakeLog()
-    log.rows[IRI.format("DE-A")] = [(7, __import__("json").dumps(DE_AWARD))]
+    log.rows[IRI.format("DE-A")] = [(7, json.dumps(DE_AWARD))]
     repairer, _ = _repairer(log, [], [])
     assert repairer.whole_notice("DE-A") == (7, DE_AWARD)
 

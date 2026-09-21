@@ -297,24 +297,33 @@ class Repairer:
                     for nid, p in plan.payloads.items()
                     if p.get("modifies_notice_id") or p.get("modifies_publication_number")]
             resolved = [r.data() for r in s.run(_RESOLVE_CYPHER, refs=refs)]
-        for nid, target, linked in ((r["m"], r["target"], r["linked"]) for r in resolved):
-            if target == nid:
-                continue
-            t_payload = plan.payloads.get(target) or (self.whole_notice(target) or (0, None))[1]
-            if t_payload is None:
-                continue
-            verdict = assess_link(facts(plan.payloads[nid]), facts(t_payload))
-            if verdict.status != REJECT:
-                plan.accepted.append((nid, target))
-                continue
-            plan.refused.append({"m": nid, "t": target, "reason": verdict.reason,
-                                 "linked": linked})
-            if is_keyed_by_back_link(plan.payloads[nid]):
-                rekeyed = dict(plan.payloads[nid])
-                rekeyed["contract_key"] = own_key(rekeyed)
-                plan.payloads[nid] = rekeyed
-                plan.rekeyed[nid] = rekeyed["contract_key"]
+        for link in resolved:
+            if link["target"] != link["m"]:
+                self._judge(plan, link["m"], link["target"], link["linked"])
         return plan
+
+    def _target_payload(self, plan: Plan, target: str) -> "dict | None":
+        if target in plan.payloads:
+            return plan.payloads[target]
+        found = self.whole_notice(target)
+        return found[1] if found else None
+
+    def _judge(self, plan: Plan, nid: str, target: str, linked: bool) -> None:
+        """Record one back-link's verdict on the plan."""
+        t_payload = self._target_payload(plan, target)
+        if t_payload is None:
+            return
+        verdict = assess_link(facts(plan.payloads[nid]), facts(t_payload))
+        if verdict.status != REJECT:
+            plan.accepted.append((nid, target))
+            return
+        plan.refused.append({"m": nid, "t": target, "reason": verdict.reason,
+                             "linked": linked})
+        if is_keyed_by_back_link(plan.payloads[nid]):
+            rekeyed = dict(plan.payloads[nid])
+            rekeyed["contract_key"] = own_key(rekeyed)
+            plan.payloads[nid] = rekeyed
+            plan.rekeyed[nid] = rekeyed["contract_key"]
 
     # ── writing ───────────────────────────────────────────
 
@@ -356,7 +365,7 @@ def _connect():
     return Repairer(sink, psycopg.connect(dsn, autocommit=True))
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="repair_chains", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -369,29 +378,40 @@ def main(argv: "list[str] | None" = None) -> int:
         if name == "rebuild":
             p.add_argument("--apply", action="store_true",
                            help="without it, print the plan and change nothing")
+    return parser
+
+
+def _process(repairer: Repairer, key: str, cmd: str, apply: bool) -> bool:
+    """Plan one entity, print it, rebuild it when asked. True when the
+    entity needs (or needed) repair."""
+    plan = repairer.plan(key)
+    if cmd == "scan" and not plan.changes_anything:
+        return False
+    print(plan.describe())
+    if cmd == "rebuild" and apply and plan.changes_anything:
+        for row in repairer.rebuild(plan):
+            print(f"  now {row['key']}: {row['ours']} of these notices "
+                  f"({row['notices']} total), award={row['award']}, "
+                  f"value={row['value']}, buyers={row['buyers']}")
+    return True
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = _parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     repairer = _connect()
+    apply = getattr(args, "apply", False)
 
     keys = list(getattr(args, "entity", []))
     if args.cmd == "scan" or getattr(args, "suspects", False):
         keys += [s["key"] for s in repairer.suspects()]
     if not keys:
         parser.error("give --entity KEY or --suspects")
-    broken = 0
-    for key in dict.fromkeys(keys):
-        plan = repairer.plan(key)
-        if args.cmd == "scan" and not plan.changes_anything:
-            continue
-        broken += 1
-        print(plan.describe())
-        if args.cmd == "rebuild" and args.apply and plan.changes_anything:
-            for row in repairer.rebuild(plan):
-                print(f"  now {row['key']}: {row['ours']} of these notices "
-                      f"({row['notices']} total), award={row['award']}, "
-                      f"value={row['value']}, buyers={row['buyers']}")
-    print(f"{broken} of {len(dict.fromkeys(keys))} entities "
-          f"{'need repair' if args.cmd != 'rebuild' or not args.apply else 'processed'}")
+    keys = list(dict.fromkeys(keys))
+    broken = sum(_process(repairer, key, args.cmd, apply) for key in keys)
+    outcome = "processed" if args.cmd == "rebuild" and apply else "need repair"
+    print(f"{broken} of {len(keys)} entities {outcome}")
     return 0
 
 
