@@ -19,6 +19,11 @@ from typing import Callable
 
 from fontem_event_schemas.integrity import contract_red_flags
 
+from neo4j_sink.cleaning import (
+    call_off_edge,
+    render_upsert_framework_agreement,
+    withheld_suppliers,
+)
 from neo4j_sink.identity import (
     render_assert_same_as,
     render_retract_same_as,
@@ -262,8 +267,9 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
     3. **Native Contract/Notice model** (contract_key present + real
        notice fields) — one :Notice node (per-notice provenance), one
        :Contract entity (display fields, high-water-guarded), a
-       NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON edges attached
-       to the Contract entity, followed by the contract-chain step
+       NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON (and, on a
+       call-off, CALL_OFF_OF) edges attached to the Contract entity,
+       followed by the contract-chain step
        (:func:`_render_contract_chain`) that links the notice to what it
        modifies, folds every notice of the chain onto the root award's
        entity and maintains is_current / award_ingested /
@@ -359,14 +365,31 @@ _NOTICE_FIELDS: tuple[str, ...] = (
     # single ingest path): the notice version, the back-link in its
     # versioned-UUID form, and the legacy authority file reference.
     "notice_version", "modifies_notice_id", "legacy_procedure_id",
+    # Cleaning stage (data-backlog Part 5, C2/C4): the values exactly as
+    # published, next to the platform's reading of them, so a rescaled
+    # or withheld figure can be compared with what the buyer wrote and
+    # the gateway-watermark census ('2000-01-01' / '0.0') runs from the
+    # graph, not a rescan; plus the ids of the rules that fired.
+    "award_date_raw", "tender_result_award_date_raw",
+    "tender_reference", "notice_language", "eforms_sdk", "value_raw",
+    "cleaning_rules",
+    # Framework agreements (C6): on the ESTABLISHING contract the ceiling
+    # and its companions (capacity, never spend); on a CALL-OFF the
+    # framework drawn from, also the CALL_OFF_OF edge (cleaning.py).
+    "framework_max_value_eur", "framework_reestimated_value_eur",
+    "framework_duration_months", "framework_max_operators",
+    "framework_id",
 )
 
 # Fields NOT denormalised onto the Contract entity: notice identity
 # and modification linkage stay per-notice (project_contracts nulls
-# them on the entity for the same reason).
+# them on the entity for the same reason), and so do the as-published
+# strings — what ONE notice printed; the entity keeps the reading.
 _NOTICE_ONLY_FIELDS = frozenset({
     "notice_type", "modifies_publication_number",
     "notice_version", "modifies_notice_id",
+    "award_date_raw", "tender_result_award_date_raw",
+    "tender_reference", "notice_language", "eforms_sdk", "value_raw",
 })
 
 # Edge props carried per parties[] item onto AWARDED_TO / BID_ON.
@@ -463,6 +486,7 @@ def _render_notice(p: dict) -> CypherWrite:
     set_props["notice_kind"] = _notice_kind(p)
     set_props["contract_key"] = p["contract_key"]
     set_props.update(notice_parties(p))
+    set_props.update(withheld_suppliers(p))
     set_props.update(contract_red_flags(p))
     clear = _contract_clears(p)
     if clear:
@@ -487,7 +511,8 @@ def _contract_entity_edges(p: dict) -> "list[tuple[str, str, dict]]":
     the party props on the edge; named tenderers (losing bidders named
     on the notice) get BID_ON (Company->Contract). The primary winner
     usually appears both as company_gmr_id and as a parties[] winner —
-    same rel type + endpoints, so the MERGEs coalesce onto one edge."""
+    same rel type + endpoints, so the MERGEs coalesce onto one edge.
+    A call-off adds CALL_OFF_OF (Contract->FrameworkAgreement)."""
     extras: list[tuple[str, str, dict]] = []
     if aid := p.get("authority_id"):
         extras.append((
@@ -506,6 +531,8 @@ def _contract_entity_edges(p: dict) -> "list[tuple[str, str, dict]]":
             edge_props,
         ))
     extras.extend(_party_edge(party) for party in p.get("parties") or [])
+    if call_off := call_off_edge(p):
+        extras.append(call_off)
     return extras
 
 
@@ -575,6 +602,7 @@ def _render_contract_entity(p: dict) -> CypherWrite:
     # Canonical-notice identity, denormalised for the read surfaces
     # (TED links etc.) exactly like project_contracts' finalize.
     guarded["ted_notice_id"] = p["ted_notice_id"]
+    guarded.update(withheld_suppliers(p))
     guarded.update(contract_red_flags(p))
     if pub := p.get("publication_date"):
         guarded["canonical_publication_date"] = pub
@@ -636,6 +664,7 @@ def _render_notice_grain_modification(p: dict) -> CypherWrite:
     strip)."""
     set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
     set_props["notice_kind"] = "modification"
+    set_props.update(withheld_suppliers(p))
     set_props.update(contract_red_flags(p))
     clear = _contract_clears(p)
     if clear:
@@ -931,6 +960,7 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertAuthority": render_upsert_authority,
     "TranslateAuthorityName": render_translate_authority_name,
     "UpsertContract": render_upsert_contract,
+    "UpsertFrameworkAgreement": render_upsert_framework_agreement,
     "UpsertTaxonomyCode": render_upsert_taxonomy_code,
     "UpsertRelationship": render_upsert_relationship,
     "UpsertDisclosure": render_upsert_disclosure,

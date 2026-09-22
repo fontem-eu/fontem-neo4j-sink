@@ -602,3 +602,194 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     rollup = chain_mod.CHAIN_ROLLUP_CYPHER
     assert "SET x.is_current = (x = latest)" in rollup
     assert "x.contract_key = e.contract_key" in rollup
+
+
+# ── cleaning stage fields (data-backlog Part 5, C2/C4/C6) ─────────
+
+
+def test_as_published_fields_stay_on_the_notice_not_the_entity():
+    """The raw strings say what ONE notice printed (the PT gateway
+    watermark pair among them); the entity keeps the platform's
+    reading, so they never denormalise."""
+    raw = {
+        "award_date_raw": "2000-01-01",
+        "tender_result_award_date_raw": "2000-01-01",
+        "tender_reference": "0.0",
+        "notice_language": "POR",
+        "eforms_sdk": "eforms-sdk-1.14",
+        "value_raw": "24474133 EUR",
+    }
+    notice, contract, _ = render_upsert_contract(_new_model_payload(**raw))
+    for k, v in raw.items():
+        assert notice.set_props[k] == v
+        assert k not in contract.set_props
+
+
+def test_cleaning_rules_and_quarantine_reason_land_on_both_labels():
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        cleaning_rules=["pt.gateway_watermark", "c4.ambiguous_scale"],
+        value_quarantined=True,
+        value_quarantine_reason="ambiguous_scale_x100_or_x1000",
+    ))
+    for w in (notice, contract):
+        assert w.set_props["cleaning_rules"] == [
+            "pt.gateway_watermark", "c4.ambiguous_scale"]
+        assert w.set_props["value_quarantine_reason"] == (
+            "ambiguous_scale_x100_or_x1000")
+        # the quarantine withholds the value, never its explanation
+        assert w.set_props.get("value_eur") is None
+        assert "value_quarantine_reason" not in (w.clear_props or [])
+
+
+def test_empty_cleaning_rules_means_cleaned_and_nothing_fired():
+    """Absent = not cleaned; [] = cleaned, nothing fired. The empty list
+    is a statement and is written."""
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        cleaning_rules=[]))
+    assert notice.set_props["cleaning_rules"] == []
+    assert contract.set_props["cleaning_rules"] == []
+    notice, contract, _ = render_upsert_contract(_new_model_payload())
+    assert "cleaning_rules" not in notice.set_props
+    assert "cleaning_rules" not in contract.set_props
+
+
+def test_suppliers_withheld_flatten_to_parallel_lists_in_order():
+    """Neo4j stores no list of maps: names[i] was withheld for
+    reasons[i], payload order kept, count alongside — on the notice and
+    (guarded) on the entity. The map list itself never reaches a node."""
+    withheld = [
+        {"name_raw": "Gara aggiudicata come da determina n. 543 del 2013",
+         "reason": "it.notice_text_in_supplier_name", "role": "winner",
+         "org_id": "ORG-0002"},
+        {"name_raw": "n/a", "reason": "generic.placeholder",
+         "role": "named_tenderer", "org_id": None},
+    ]
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        company_gmr_id=None, suppliers_withheld=withheld))
+    for w in (notice, contract):
+        assert w.set_props["suppliers_withheld_names"] == [
+            "Gara aggiudicata come da determina n. 543 del 2013", "n/a"]
+        assert w.set_props["suppliers_withheld_reasons"] == [
+            "it.notice_text_in_supplier_name", "generic.placeholder"]
+        assert w.set_props["suppliers_withheld_count"] == 2
+        assert "suppliers_withheld" not in w.set_props
+    # withheld suppliers are not parties: no edge, no winner name
+    assert not [r for r in contract.extra_relationships or []
+                if r[0] in ("AWARDED_TO", "BID_ON")]
+    assert "winner_names" not in notice.set_props
+
+
+def test_suppliers_withheld_explicit_empty_list_is_written():
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        suppliers_withheld=[]))
+    for w in (notice, contract):
+        assert w.set_props["suppliers_withheld_names"] == []
+        assert w.set_props["suppliers_withheld_reasons"] == []
+        assert w.set_props["suppliers_withheld_count"] == 0
+
+
+def test_suppliers_withheld_absent_neither_sets_nor_clears():
+    """An emit that says nothing about withheld suppliers leaves what an
+    earlier one wrote: the props are absent from SET += (which never
+    deletes) and from the clears, and the entity write stays under the
+    high-water guard like every other display field."""
+    notice, contract, _ = render_upsert_contract(_new_model_payload())
+    for w in (notice, contract):
+        for k in ("suppliers_withheld_names", "suppliers_withheld_reasons",
+                  "suppliers_withheld_count"):
+            assert k not in w.set_props
+            assert k not in (w.clear_props or [])
+    assert contract.guard_prop == "canonical_publication_date"
+
+
+def test_withheld_item_without_name_is_dropped_lists_stay_aligned():
+    notice, _, _ = render_upsert_contract(_new_model_payload(
+        suppliers_withheld=[
+            {"name_raw": "", "reason": "x", "role": "winner"},
+            {"name_raw": "diversi", "role": "winner"},
+        ]))
+    assert notice.set_props["suppliers_withheld_names"] == ["diversi"]
+    assert notice.set_props["suppliers_withheld_reasons"] == [""]
+    assert notice.set_props["suppliers_withheld_count"] == 1
+
+
+def test_framework_facts_land_on_both_labels():
+    facts = {
+        "framework_max_value_eur": 5_000_000.0,
+        "framework_reestimated_value_eur": 3_200_000.0,
+        "framework_duration_months": 48,
+        "framework_max_operators": 3,
+    }
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        is_framework=True, **facts))
+    for w in (notice, contract):
+        for k, v in facts.items():
+            assert w.set_props[k] == v
+    # an establishing contract is not a call-off of anything
+    assert not [r for r in contract.extra_relationships
+                if r[0] == "CALL_OFF_OF"]
+
+
+def test_call_off_writes_framework_id_and_call_off_of_edge():
+    """A call-off names the framework it draws from: the id is a prop on
+    both labels, and the entity gets Contract-[:CALL_OFF_OF]->
+    FrameworkAgreement (from_source, like AWARDED_TO). The edge is the
+    entity's, never the notice's."""
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        framework_id="proc:FA-1"))
+    assert notice.set_props["framework_id"] == "proc:FA-1"
+    assert contract.set_props["framework_id"] == "proc:FA-1"
+    assert ("CALL_OFF_OF",
+            "http://data.fontem.eu/id/FrameworkAgreement/proc:FA-1",
+            {"_direction": "from_source"}) in contract.extra_relationships
+    assert {r[0] for r in notice.extra_relationships} == {"NOTICE_OF"}
+
+
+def test_call_off_edge_stubs_a_framework_agreement_not_yet_established():
+    """The establishing event may arrive after the call-off: the sink
+    mints a {_stub: true} :FrameworkAgreement keyed by framework_id so
+    the edge is never dropped, and UpsertFrameworkAgreement's MERGE on
+    the same key fills it in (REMOVE n._stub)."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([_contract_event(_new_model_payload(framework_id="proc:FA-1"))])
+    q, params = next(c for c in calls if "[r:CALL_OFF_OF]" in c[0])
+    assert "MATCH (s:Contract { contract_key: row.contract_key })" in q
+    assert ("MERGE (ts:FrameworkAgreement { framework_id: row.tgt_key }) "
+            "SET ts._stub = true" in q)
+    assert "MATCH (t:FrameworkAgreement { framework_id: row.tgt_key })" in q
+    assert "MERGE (s)-[r:CALL_OFF_OF]->(t)" in q
+    assert params["rows"] == [{"contract_key": "proc:P-77",
+                               "tgt_key": "proc:FA-1", "props": {}}]
+
+
+def test_legacy_notice_grain_render_ignores_cleaning_fields():
+    """The keyless shape is frozen for byte-identical replay from seq 0;
+    a cleaning field on such an event (there should be none — the
+    cleaner emits the native shape) is dropped, not smuggled in."""
+    w = render_upsert_contract({
+        "ted_notice_id": "2025-OJS111-000002", "title": "T",
+        "value_raw": "1 EUR", "cleaning_rules": ["x"],
+        "suppliers_withheld": [{"name_raw": "n/a", "reason": "r",
+                                "role": "winner"}],
+        "framework_id": "proc:FA-1",
+    })
+    assert w.label == "Contract"
+    assert set(w.set_props) == {"title"}
+    assert w.extra_relationships is None
+
+
+def test_cleaning_fields_replay_is_byte_identical():
+    """The new props ride the same MERGE-idempotent, guarded writes:
+    delivering the batch again yields the same Cypher and rows."""
+    sink1, calls1 = _make_sink_with_mock_driver()
+    sink2, calls2 = _make_sink_with_mock_driver()
+    batch = [_contract_event(_new_model_payload(
+        framework_id="proc:FA-1", cleaning_rules=["c4.scale"],
+        value_raw="1000 EUR", award_date_raw="2000-01-01",
+        suppliers_withheld=[{"name_raw": "n/a", "reason": "r",
+                             "role": "winner"}]))]
+    sink1.handle(batch)
+    sink2.handle(batch)
+    sink2.handle(batch)          # the replay
+    assert calls2[:len(calls1)] == calls1
+    assert calls2[len(calls1):] == calls1
