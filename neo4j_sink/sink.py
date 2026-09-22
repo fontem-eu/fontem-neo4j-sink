@@ -918,6 +918,11 @@ class Neo4jSink(EventConsumer):
         # :Notice node keeps the notice key.
         "ContractEntity": "contract_key",
         "Notice": "ted_notice_id",
+        # Framework agreement (C6): keyed by the establishing procedure,
+        # the same value a call-off's UpsertContract carries as
+        # framework_id. Unique-constrained by
+        # migrations/framework_agreement_constraints_2026_09.py.
+        "FrameworkAgreement": "framework_id",
         "Cpv": "code",
         "Nuts": "code",
         "Programme": "code",
