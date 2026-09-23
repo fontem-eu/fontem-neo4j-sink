@@ -206,6 +206,34 @@ def test_old_shape_event_renders_legacy_cypher_byte_identical():
     )
 
 
+def test_chain_rollup_does_not_resurrect_a_quarantined_value():
+    """The rollup picks the newest notice that still HAS a value. A
+    quarantined notice has none by design, so without a guard the rollup
+    reaches past it to an older notice and writes that figure back onto
+    the entity, undoing the quarantine clear.
+
+    That was the whole of values.quarantined_carries_no_value — 860 prod
+    violations on 2026-09-23, each a contract whose chain still held an
+    older notice with a number (traced on contract_key
+    56911733-ea51-474a-aaab-f9f6f65d1d0b: two 2026-09-13 notices at EUR
+    1.67bn and 570m, then a 2026-09-23 notice quarantined as
+    ambiguous_scale_x100_or_x1000; the entity kept 570m)."""
+    from neo4j_sink.chain import CHAIN_ROLLUP_CYPHER as c
+
+    assert "coalesce(latest.value_quarantined, false) AS quarantined" in c
+    # every monetary prop the rollup writes has to honour the guard
+    for prop in ("e.current_value", "e.value_eur", "e.value_original",
+                 "e.value_currency"):
+        i = c.index(prop + " =")
+        assert "quarantined THEN null" in c[i:i + 120], prop
+    # ... and the marker itself follows the canonical notice, so an
+    # entity cannot end up quarantined by an old notice while a newer
+    # healthy one supplies the value (214 of the 862 violations).
+    assert "e.value_quarantined = CASE WHEN quarantined THEN true ELSE null END" in c
+    i = c.index("e.value_quarantine_reason =")
+    assert "ELSE null END" in c[i:i + 120]
+
+
 def test_rollup_partial_restates_current_value_on_the_entity():
     """A collapse_modifications rollup that carries contract_key restates
     current_value on the canonical :Contract entity (keyed by

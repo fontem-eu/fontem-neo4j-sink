@@ -146,12 +146,39 @@ CHAIN_ROLLUP_CYPHER = (
     "WITH e, ordered, ordered[0] AS latest, "
     "[x IN ordered WHERE x.value_eur IS NOT NULL] AS valued, "
     "any(x IN ordered WHERE x.notice_kind = 'award') AS has_award "
+    # A quarantined canonical notice means the platform does not stand
+    # behind this contract's value. `valued` skips that notice (it
+    # carries no value_eur, by design), so without this guard the
+    # rollup reaches PAST it to an older notice and writes that figure
+    # back onto the entity — silently undoing the quarantine clear the
+    # entity write just made. That is the whole of
+    # values.quarantined_carries_no_value: 860 prod violations on
+    # 2026-09-23, every one of them a contract whose chain holds an
+    # older notice that still had a number.
+    "WITH e, ordered, latest, valued, has_award, "
+    "coalesce(latest.value_quarantined, false) AS quarantined "
     "SET e.award_ingested = has_award, "
     "e.notice_kind = CASE WHEN has_award THEN 'award' ELSE 'modification' END, "
     "e.notice_count = size(ordered), "
     "e.is_current = true, "
-    "e.current_value = CASE WHEN size(valued) > 0 THEN valued[0].value_eur END, "
-    "e.value_eur = CASE WHEN size(valued) > 0 THEN valued[0].value_eur END, "
+    "e.current_value = CASE WHEN quarantined THEN null "
+    "  WHEN size(valued) > 0 THEN valued[0].value_eur END, "
+    "e.value_eur = CASE WHEN quarantined THEN null "
+    "  WHEN size(valued) > 0 THEN valued[0].value_eur END, "
+    "e.value_original = CASE WHEN quarantined THEN null "
+    "  ELSE e.value_original END, "
+    "e.value_currency = CASE WHEN quarantined THEN null "
+    "  ELSE e.value_currency END, "
+    # The marker follows the canonical notice for the same reason the
+    # value does. The mirror of the bug above: an entity kept a
+    # quarantine marker an OLDER notice left behind while a newer,
+    # healthy notice supplied the value — quarantined and valued at
+    # once (214 of the 862 prod violations on 2026-09-23). Deriving
+    # both from `latest` keeps the two halves of the value story from
+    # coming from different notices.
+    "e.value_quarantined = CASE WHEN quarantined THEN true ELSE null END, "
+    "e.value_quarantine_reason = CASE WHEN quarantined "
+    "  THEN latest.value_quarantine_reason ELSE null END, "
     "e.ted_notice_id = latest.ted_notice_id, "
     "e.canonical_publication_date = latest.publication_date "
     "FOREACH (x IN ordered | SET x.is_current = (x = latest), "
