@@ -1,12 +1,13 @@
 """What the ingest cleaning stage adds to the graph beyond scalars.
 
 gitops data-backlog Part 5 lands the cleaner (C2/C4) and the framework
-agreement node (C6) in one reprocess campaign (C8). The scalar fields
-they add ride cypher.py's per-notice whitelist; this module holds the
-shapes that are not plain scalars, split out of cypher.py the way
+agreement node (C6) in one reprocess campaign (C8). Most of the scalar
+fields they add ride cypher.py's per-notice whitelist; this module
+holds what cannot be read in isolation, split out of cypher.py the way
 identity.py was — the pair that has to stay consistent lives together:
-the withheld-supplier lists (C2), and the :FrameworkAgreement node plus
-the CALL_OFF_OF edge that must resolve it by the same key (C6).
+the withheld-supplier lists (C2), and the :FrameworkAgreement node, the
+CALL_OFF_OF edge that must resolve it by the same key, and the
+framework scalars whose meaning that key decides (C6).
 """
 from __future__ import annotations
 
@@ -44,12 +45,64 @@ def withheld_suppliers(p: dict) -> dict:
     }
 
 
+# Framework fields of a plain UpsertContract, spliced into cypher.py's
+# per-notice whitelist so they land on the :Notice and, because none of
+# them is notice-only, on the :Contract entity the UI reads.
+#
+# framework_id is eForms OPT-100
+# (efac:NoticeResult/efac:SettledContract/cac:NoticeDocumentReference/
+# cbc:ID). The framework-establishing award notice and every call-off
+# under it carry the IDENTICAL value — notices 761784-2024 and
+# 3406-2025 both carry '536632-2024' — which is what makes it a
+# GROUPING key and not a pointer: ~80% of the time it names a call for
+# competition, which this platform does not ingest (prod holds 0
+# contract notices), so it resolves to a :Contract we hold only ~13.6%
+# of the time. Readers group on it (via the contract_framework_id
+# index) and may say no more than "part of a framework agreement":
+# nothing in the data separates an establishing award from a call-off,
+# so the cluster has no order, and a contract carrying no framework_id
+# is not a contract with no framework — pre-2024 notices have no such
+# field at all.
+#
+# framework_id_source records which element the value was read off
+# (OPT-100, or the BT-125 fallback, which the parser normalises: TED's
+# own index matches '536632-2024' and returns nothing for the
+# zero-padded '00536632-2024' the same notice carries at BT-125). It is
+# deliberately not notice-only — the entity's framework_id is written
+# under the canonical_publication_date high-water guard, so its
+# provenance has to be written by the same notice under the same guard,
+# or the entity ends up showing one notice's id with another's source.
+#
+# The framework terms are the agreement's CEILING and its companions:
+# capacity, never money paid, so nothing may sum them into spend.
+CONTRACT_FRAMEWORK_FIELDS: tuple[str, ...] = (
+    "framework_max_value_eur", "framework_reestimated_value_eur",
+    "framework_duration_months", "framework_max_operators",
+    "framework_id", "framework_id_source",
+)
+
+
 def call_off_edge(p: dict) -> "tuple[str, str, dict] | None":
     """The CALL_OFF_OF edge of a call-off contract (Contract ->
     FrameworkAgreement, from the entity like AWARDED_TO), or None when
     the payload names no framework. The sink stubs the
     :FrameworkAgreement when the establishing event has not arrived
-    yet; that event's own MERGE on the same key fills the stub in."""
+    yet; that event's own MERGE on the same key fills the stub in.
+
+    UNDER REVIEW, deliberately left as written for now. framework_id is
+    eForms OPT-100, which the framework-establishing award notice and
+    every call-off under it carry identically (761784-2024 and
+    3406-2025 both carry '536632-2024'), and no field in the data
+    separates the two — is_framework is on both. So a contract this
+    edge calls a call-off may be the establishing award, and ~80% of
+    the time the value names a call for competition we never ingest, so
+    the node on the far end is a stub with nothing in it. Renaming the
+    edge to something the data supports touches every reader, so it is
+    a coordinated change, not a quiet one here; it has to land before a
+    producer starts filling framework_id (0 :Contract carry it in prod
+    today). Meanwhile the read path — "other awards under this
+    framework" — runs off the indexed :Contract.framework_id property,
+    never off this edge, so the rename does not block it."""
     fid = p.get("framework_id")
     if not fid:
         return None

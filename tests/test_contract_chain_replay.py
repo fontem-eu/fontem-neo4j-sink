@@ -65,6 +65,8 @@ _SCHEMA = (
     "FOR (n:Notice) ON (n.modifies_notice_id)",
     "CREATE CONSTRAINT framework_agreement_framework_id_unique IF NOT EXISTS "
     "FOR (f:FrameworkAgreement) REQUIRE f.framework_id IS UNIQUE",
+    "CREATE INDEX contract_framework_id IF NOT EXISTS "
+    "FOR (c:Contract) ON (c.framework_id)",
 )
 
 

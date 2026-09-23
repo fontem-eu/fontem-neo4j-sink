@@ -20,6 +20,7 @@ from typing import Callable
 from fontem_event_schemas.integrity import contract_red_flags
 
 from neo4j_sink.cleaning import (
+    CONTRACT_FRAMEWORK_FIELDS,
     call_off_edge,
     render_upsert_framework_agreement,
     withheld_suppliers,
@@ -373,12 +374,10 @@ _NOTICE_FIELDS: tuple[str, ...] = (
     "award_date_raw", "tender_result_award_date_raw",
     "tender_reference", "notice_language", "eforms_sdk", "value_raw",
     "cleaning_rules",
-    # Framework agreements (C6): on the ESTABLISHING contract the ceiling
-    # and its companions (capacity, never spend); on a CALL-OFF the
-    # framework drawn from, also the CALL_OFF_OF edge (cleaning.py).
-    "framework_max_value_eur", "framework_reestimated_value_eur",
-    "framework_duration_months", "framework_max_operators",
-    "framework_id",
+    # Framework agreements (C6). Declared in cleaning.py next to the
+    # CALL_OFF_OF edge built from the same key — see there for what
+    # framework_id is and what may not be read out of it.
+    *CONTRACT_FRAMEWORK_FIELDS,
 )
 
 # Fields NOT denormalised onto the Contract entity: notice identity
