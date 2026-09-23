@@ -10,6 +10,7 @@ is append-only and replayable from seq 0."""
 from neo4j_sink import chain as chain_mod
 from neo4j_sink.cypher import render_upsert_contract
 from neo4j_sink.sink import Neo4jSink
+from neo4j_sink.chain import CHAIN_ROLLUP_CYPHER
 from tests.test_bracket_loss_repro import _ev, _make_sink_with_mock_driver
 
 
@@ -218,8 +219,7 @@ def test_chain_rollup_does_not_resurrect_a_quarantined_value():
     56911733-ea51-474a-aaab-f9f6f65d1d0b: two 2026-09-13 notices at EUR
     1.67bn and 570m, then a 2026-09-23 notice quarantined as
     ambiguous_scale_x100_or_x1000; the entity kept 570m)."""
-    from neo4j_sink.chain import CHAIN_ROLLUP_CYPHER as c
-
+    c = CHAIN_ROLLUP_CYPHER
     assert "coalesce(latest.value_quarantined, false) AS quarantined" in c
     # every monetary prop the rollup writes has to honour the guard
     for prop in ("e.current_value", "e.value_eur", "e.value_original",
