@@ -348,7 +348,10 @@ def _notice_kind(p: dict) -> str:
 # rollup fields, which are per-contract in the new model but stay
 # renderable on the Notice for rollup replays).
 _NOTICE_FIELDS: tuple[str, ...] = (
-    "title", "publication_date", "value_eur",
+    # title_lang travels with title: the ISO 639-1 language the notice
+    # says its title is in, which the translation enrichment starts from.
+    # Denormalised onto the entity like title, never notice-only.
+    "title", "title_lang", "publication_date", "value_eur",
     "value_currency", "value_original",
     "value_before_eur", "value_before_original",
     "cpv", "nuts", "language", "country",

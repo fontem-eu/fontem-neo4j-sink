@@ -821,3 +821,22 @@ def test_cleaning_fields_replay_is_byte_identical():
     sink2.handle(batch)          # the replay
     assert calls2[:len(calls1)] == calls1
     assert calls2[len(calls1):] == calls1
+
+
+# ── title language ──────────────────────────────────────────────────
+
+
+def test_the_title_language_travels_with_the_title_onto_the_entity():
+    """The entity's title is the canonical notice's, so is its language:
+    translation reads it off the :Contract, not the :Notice."""
+    notice, contract, _ = render_upsert_contract(_new_model_payload(
+        title="lavori di manutenzione", title_lang="it"))
+    for w in (notice, contract):
+        assert w.set_props["title"] == "lavori di manutenzione"
+        assert w.set_props["title_lang"] == "it"
+
+
+def test_no_title_language_claims_none():
+    notice, contract, _ = render_upsert_contract(_new_model_payload())
+    assert "title_lang" not in notice.set_props
+    assert "title_lang" not in contract.set_props
