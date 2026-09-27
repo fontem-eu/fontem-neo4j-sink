@@ -545,7 +545,7 @@ def test_explicit_null_current_value_falls_back_to_value_eur():
 # ── contract chain (native linking + adoption) ─────────────────────
 
 
-def test_native_emit_carries_a_chain_write_with_both_back_link_forms():
+def test_native_emit_carries_a_chain_write_keyed_by_the_notice():
     _, _, chain = render_upsert_contract(_new_model_payload(
         notice_kind="modification", notice_type="can-modif",
         notice_version="02",
@@ -553,8 +553,8 @@ def test_native_emit_carries_a_chain_write_with_both_back_link_forms():
     ))
     assert chain.label == "_ContractChain"
     assert chain.primary_key == {"ted_notice_id": "uuid-award-1"}
-    assert chain.set_props == {"modifies_notice_id": None,
-                               "modifies_publication_number": "549184-2020"}
+    # the back-link is read off the version-guarded :Notice, not this emit
+    assert chain.set_props == {}
 
 
 def test_identity_stamps_stay_on_the_notice_not_the_entity():
@@ -593,10 +593,7 @@ def test_chain_step_runs_after_notice_of_and_before_typed_relationships():
     assert notice_of < link < adopt < rollup
     # one UNWIND per step for the whole batch, rows in seq order
     rows = calls[link][1]["rows"]
-    assert rows == [
-        {"nid": "uuid-award-1", "prev_nid": None, "prev_pub": None},
-        {"nid": "uuid-mod-1", "prev_nid": "uuid-award-1", "prev_pub": None},
-    ]
+    assert rows == [{"nid": "uuid-award-1"}, {"nid": "uuid-mod-1"}]
     # adopt runs once per notice (a merge deletes a node a later UNWIND
     # row may already hold); link and roll-up once per batch
     adopts = [c for c in calls if "apoc.refactor.mergeNodes" in c[0]]
@@ -611,9 +608,10 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     indexed property; an OR across two properties would label-scan
     every :Notice (see the Neo4j OR-disjunction note)."""
     link = chain_mod.CHAIN_CANDIDATES_CYPHER
-    assert "OPTIONAL MATCH (p1:Notice { ted_notice_id: row.prev_nid })" in link
-    assert ("OPTIONAL MATCH (p2:Notice { ted_publication_number: row.prev_pub })"
+    assert ("OPTIONAL MATCH (p1:Notice { ted_notice_id: n.modifies_notice_id })"
             in link)
+    assert ("OPTIONAL MATCH (p2:Notice { ted_publication_number: "
+            "n.modifies_publication_number })" in link)
     assert " OR " not in link
     # resolving a back-link writes nothing: only judged links are merged
     assert "MERGE" not in link and "SET" not in link
@@ -630,6 +628,65 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     rollup = chain_mod.CHAIN_ROLLUP_CYPHER
     assert "SET x.is_current = (x = latest)" in rollup
     assert "x.contract_key = e.contract_key" in rollup
+
+
+def test_rollup_orders_by_the_chain_before_the_calendar():
+    """A notice another notice of the contract names in its back-link is
+    never the latest, and only a back-link counts: the retired linker's
+    procedure-wide MODIFIES edges must not order anything."""
+    rollup = chain_mod.CHAIN_ROLLUP_CYPHER
+    assert ("EXISTS { (y:Notice)-[:MODIFIES]->(x) WHERE (y)-[:NOTICE_OF]->(e) "
+            "AND (y.modifies_notice_id = x.ted_notice_id "
+            "OR y.modifies_publication_number = x.ted_publication_number) } "
+            "AS superseded" in rollup)
+    assert ("ORDER BY superseded, coalesce(x.publication_date, '') DESC, "
+            "x.ted_notice_id DESC" in rollup)
+
+
+# ── notice versions ───────────────────────────────────────────────
+
+
+def test_versioned_notice_is_guarded_by_its_version():
+    """An eForms notice's versions share one :Notice, so the write is
+    guarded by notice_version: an older version never overwrites a newer
+    one. Clears fold into the guarded props as nulls, as on the entity."""
+    notice, _, _ = render_upsert_contract(_new_model_payload(
+        notice_version="02", value_eur=1.8e14,
+        value_quarantined=True, value_quarantine_reason="implausible_magnitude",
+    ))
+    assert notice.guard_prop == "notice_version"
+    assert notice.set_props["notice_version"] == "02"
+    assert notice.clear_props is None
+    assert "value_eur" in notice.set_props and notice.set_props["value_eur"] is None
+    assert notice.extra_relationships[0][0] == "NOTICE_OF"
+
+
+def test_unversioned_notice_writes_unguarded():
+    """Legacy TED keys each publication by its own id: no version, no
+    guard, clears stay REMOVEs."""
+    notice, _, _ = render_upsert_contract(_new_model_payload(
+        value_eur=None, value_quality_flag="no_awarded_value",
+    ))
+    assert notice.guard_prop is None
+    assert "value_eur" in (notice.clear_props or [])
+    assert "value_eur" not in notice.set_props
+
+
+def test_versioned_notices_apply_through_the_guarded_merge():
+    """Two versions of one notice in one batch stay separate guarded
+    rows in seq order, so the in-Cypher version guard decides."""
+    sink, calls = _make_sink_with_mock_driver()
+    sink.handle([
+        _contract_event(_new_model_payload(notice_version="02", value_eur=1200.0)),
+        _contract_event(_new_model_payload(notice_version="01"), seq=2),
+    ])
+    guarded = [(q, params) for q, params in calls
+               if "MERGE (n:Notice" in q and "n.notice_version" in q]
+    assert len(guarded) == 1
+    q, params = guarded[0]
+    assert ("coalesce(row.props.notice_version, '') >= "
+            "coalesce(n.notice_version, '')" in q)
+    assert [r["props"]["notice_version"] for r in params["rows"]] == ["02", "01"]
 
 
 # ── cleaning stage fields (data-backlog Part 5, C2/C4/C6) ─────────

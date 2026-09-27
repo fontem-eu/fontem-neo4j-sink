@@ -31,6 +31,7 @@ from neo4j_sink.identity import (
 )
 # Re-exported: CypherWrite lived here until identity.py needed it
 # too, and every caller and test imports it from this module.
+from neo4j_sink.chain import render_contract_chain
 from neo4j_sink.writes import CypherWrite
 
 
@@ -271,7 +272,7 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
        NOTICE_OF edge, and AWARDED / AWARDED_TO / BID_ON (and, on a
        call-off, CALL_OFF_OF) edges attached to the Contract entity,
        followed by the contract-chain step
-       (:func:`_render_contract_chain`) that links the notice to what it
+       (:func:`neo4j_sink.chain.render_contract_chain`) that links the notice to what it
        modifies, folds every notice of the chain onto the root award's
        entity and maintains is_current / award_ingested /
        current_value. This is the shape project_contracts used to
@@ -306,32 +307,8 @@ def render_upsert_contract(p: dict) -> "CypherWrite | list[CypherWrite]":
         return _render_contract_notice_grain(p)
     return [
         _render_notice(p), _render_contract_entity(p),
-        _render_contract_chain(p),
+        render_contract_chain(p),
     ]
-
-
-def _render_contract_chain(p: dict) -> CypherWrite:
-    """The contract-chain step for one native notice, applied by the
-    sink after the notice, its entity and its NOTICE_OF edge exist
-    (see Neo4jSink._apply_contract_chains).
-
-    A modification carries its back-link (BT-1501) in one of two forms;
-    the sink resolves it against the graph on write — never against
-    TED — so the MODIFIES edge exists from the first event, not from a
-    later linking pass. An award resolves the reverse direction too, so
-    a late-arriving award picks up modifications already in the graph.
-    Every notice of the chain then shares ONE :Contract entity, the
-    root award's (its key), and the entity's roll-up fields are
-    recomputed from the chain. Replay from seq 0 converges: the
-    outcome depends on the chain, not on arrival order."""
-    return CypherWrite(
-        label="_ContractChain",
-        primary_key={"ted_notice_id": p["ted_notice_id"]},
-        set_props={
-            "modifies_notice_id": p.get("modifies_notice_id"),
-            "modifies_publication_number": p.get("modifies_publication_number"),
-        },
-    )
 
 
 def _notice_kind(p: dict) -> str:
@@ -483,7 +460,19 @@ def _render_notice(p: dict) -> CypherWrite:
     edge to its Contract entity. The Contract-entity target IRI uses
     the ContractEntity segment: the plain Contract segment must keep
     resolving by ted_notice_id forever (link_ted_modifications MODIFIES
-    events in the log reference notices that way)."""
+    events in the log reference notices that way).
+
+    An eForms notice is republished under the same id as version 02,
+    03…, and all its versions share this one node. A versioned emit is
+    therefore guarded by notice_version ("01".."99", so a string compare
+    orders it): an older version never overwrites a newer one, whatever
+    order the months are loaded or rescanned in. Measured on prod
+    2026-09-27: 376 of the 1,007 multi-version notices held an older
+    version, 336 of them their contract's current notice. An emit
+    without a version (legacy TED, where each publication has its own
+    id) is not a version statement and writes as before; a node without
+    one takes any version. Clears fold into the guarded props as nulls,
+    as on the entity, so a stale version cannot strip a value either."""
     set_props = {k: p[k] for k in _NOTICE_FIELDS if p.get(k) is not None}
     set_props["notice_kind"] = _notice_kind(p)
     set_props["contract_key"] = p["contract_key"]
@@ -494,6 +483,11 @@ def _render_notice(p: dict) -> CypherWrite:
     if clear:
         for k in clear:
             set_props.pop(k, None)
+    guard = None
+    if p.get("notice_version") is not None:
+        guard = "notice_version"
+        set_props.update(dict.fromkeys(clear or (), None))
+        clear = None
     return CypherWrite(
         label="Notice",
         primary_key={"ted_notice_id": p["ted_notice_id"]},
@@ -504,6 +498,7 @@ def _render_notice(p: dict) -> CypherWrite:
             {"_direction": "from_source"},
         )],
         clear_props=clear,
+        guard_prop=guard,
     )
 
 
