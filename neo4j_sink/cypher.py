@@ -878,7 +878,8 @@ def render_upsert_disclosure(p: dict) -> CypherWrite:
     set_props = {
         k: p[k] for k in (
             "company_gmr_id", "disclosure_type", "filed_date",
-            "year", "title", "url",
+            # title_lang: the title's language when the source states it.
+            "year", "title", "title_lang", "url",
         ) if p.get(k) is not None
     }
     set_props.update(_flatten_disclosure_details(p.get("details")))

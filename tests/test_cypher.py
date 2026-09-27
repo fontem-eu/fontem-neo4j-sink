@@ -887,3 +887,20 @@ def test_contract_full_emit_splits_into_notice_and_contract():
     assert contract.primary_key == {"contract_key": "proc:P-2"}
     assert contract.set_props["current_value"] == 90.0
     assert contract.set_props["value_eur"] == 90.0
+
+
+def test_upsert_disclosure_writes_a_stated_title_language():
+    """Kohesio states the title's language through its English-name column."""
+    w = render_upsert_disclosure({
+        "system": "eu-cohesion", "disclosure_id": "Q7430931",
+        "title": "Fund of Funds", "title_lang": "en",
+    })
+    assert w.set_props["title"] == "Fund of Funds"
+    assert w.set_props["title_lang"] == "en"
+
+
+def test_upsert_disclosure_claims_no_language_it_was_not_given():
+    w = render_upsert_disclosure({
+        "system": "eu-cohesion", "disclosure_id": "Q1", "title": "Opieka nad dziećmi",
+    })
+    assert "title_lang" not in w.set_props
