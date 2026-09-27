@@ -448,3 +448,84 @@ def test_an_ordinary_link_carries_no_marker(sink, neo4j):
         row = s.run("MATCH (n:Notice {ted_notice_id: 'M1'}) RETURN "
                     "n.back_link_status AS s, n.back_link_reason AS r").single()
     assert row["s"] is None and row["r"] is None
+
+
+# ── chronology: versions and same-day notices ─────────────────────
+
+
+def _notice(driver, nid):
+    with driver.session() as s:
+        return s.run(
+            "MATCH (n:Notice { ted_notice_id: $nid }) RETURN n.notice_version AS v, "
+            "n.value_eur AS value, n.title AS title, n.publication_date AS date",
+            nid=nid).single().data()
+
+
+def _reset(driver):
+    with driver.session() as s:
+        s.run("MATCH (n) DETACH DELETE n")
+
+
+def test_an_older_version_never_overwrites_a_newer_one(sink, neo4j):
+    """The rescan case (prod 2026-09-27: 376 notices held an older
+    version). v02 lands first, then a rescan of an earlier month
+    re-emits v01: the notice and its contract keep v02, exactly as when
+    the versions arrive in publication order."""
+    _, driver = neo4j
+    v2 = _award(notice_version="02", publication_date="2026-02-01",
+                value_eur=1200.0, title="Bridge works (corrected)")
+    newest = {"v": "02", "value": 1200.0, "title": "Bridge works (corrected)",
+              "date": "2026-02-01"}
+    sink.handle(_events(v2, _award()))
+    _assert_one_chain(_state(driver), "P1", latest="A", current_value=1200.0)
+    assert _notice(driver, "A") == newest
+    _reset(driver)
+    sink.handle(_events(_award(), v2))
+    _assert_one_chain(_state(driver), "P1", latest="A", current_value=1200.0)
+    assert _notice(driver, "A") == newest
+
+
+def test_a_stale_version_cannot_restore_a_corrected_back_link(sink, neo4j):
+    """The chain step reads the back-link off the guarded node: M1's v02
+    corrected its back-link from M0 to A, and a later re-emit of v01
+    must not link M1 to M0 again."""
+    _, driver = neo4j
+    m0 = _mod("M0", ted_publication_number="150-2026", modifies_notice_id="A",
+              publication_date="2026-02-01", value_eur=1100.0)
+    m1_v1 = _mod("M1", ted_publication_number="200-2026", modifies_notice_id="M0",
+                 publication_date="2026-03-01", value_eur=1500.0)
+    m1_v2 = dict(m1_v1, notice_version="02", modifies_notice_id="A",
+                 publication_date="2026-03-05")
+    sink.handle(_events(_award(), m0, m1_v2, m1_v1))
+    state = _state(driver)
+    assert state["modifies"] == [("M0", "A"), ("M1", "A")]
+    assert _notice(driver, "M1")["v"] == "02"
+
+
+def test_a_same_day_modification_is_current_whatever_the_ids(sink, neo4j):
+    """eForms ids are random UUIDs, so on a shared publication date the
+    id says nothing. The modification names the award, so it is the
+    latest — in either arrival order, and with ids either way round."""
+    _, driver = neo4j
+    for award_id, mod_id in (("A", "Z"), ("Z", "A")):
+        award = _award(ted_notice_id=award_id, publication_date="2026-03-01")
+        mod = _mod(mod_id, ted_publication_number="200-2026",
+                   modifies_notice_id=award_id, publication_date="2026-03-01",
+                   value_eur=1500.0)
+        for order in ((award, mod), (mod, award)):
+            _reset(driver)
+            sink.handle(_events(*order))
+            _assert_one_chain(_state(driver), "P1", latest=mod_id,
+                              current_value=1500.0)
+
+
+def test_an_award_republished_after_its_modification_stays_superseded(sink, neo4j):
+    """A corrected award (v02) published after a modification restates
+    the award, not the contract's current total: the modification it is
+    named by stays the latest."""
+    _, driver = neo4j
+    v2 = _award(notice_version="02", publication_date="2026-04-01",
+                value_eur=1050.0)
+    sink.handle(_events(_award(), M1, v2))
+    _assert_one_chain(_state(driver), "P1", latest="M1", current_value=1500.0)
+    assert _notice(driver, "A")["v"] == "02"

@@ -22,7 +22,11 @@ _STATUS_ON_NOTICE = {OK: None, DOUBTFUL: "doubtful", REJECT: "rejected"}
 
 # 1. Link. The notice's back-link resolves to the previous notice by
 #    notice id or by publication number (two indexed seeks, not an
-#    OR-disjunction). Then the reverse direction: notices already in
+#    OR-disjunction). The back-link is read off the :Notice node, not
+#    the event: the node holds the newest version (the write is guarded
+#    by notice_version), so a rescan re-emitting an older version cannot
+#    bring back a back-link the buyer later corrected. Then the reverse
+#    direction: notices already in
 #    the graph whose back-link names THIS notice (a late award, or a
 #    late middle notice). A `{prop: null}` pattern never matches, so
 #    absent back-links cost nothing.
@@ -57,8 +61,9 @@ def _facts(var: str) -> str:
 CHAIN_CANDIDATES_CYPHER = (
     "UNWIND $rows AS row "
     "MATCH (n:Notice { ted_notice_id: row.nid }) "
-    "OPTIONAL MATCH (p1:Notice { ted_notice_id: row.prev_nid }) "
-    "OPTIONAL MATCH (p2:Notice { ted_publication_number: row.prev_pub }) "
+    "OPTIONAL MATCH (p1:Notice { ted_notice_id: n.modifies_notice_id }) "
+    "OPTIONAL MATCH (p2:Notice { ted_publication_number: "
+    "n.modifies_publication_number }) "
     "WITH n, coalesce(p1, p2) AS p "
     "OPTIONAL MATCH (s1:Notice { modifies_notice_id: n.ted_notice_id }) "
     "WITH n, p, collect(s1) AS by_id "
@@ -130,18 +135,36 @@ CHAIN_ADOPT_CYPHER = (
     "RETURN count(node) AS merged"
 )
 # 3. Roll up. On each entity the chain touched: is_current on exactly
-#    the latest notice (by publication date), award_ingested /
+#    the latest notice, award_ingested /
 #    notice_kind from whether an award is in the chain, notice_count
 #    from the chain, current_value = the latest restated value
 #    (the newest notice whose value was not withheld), and every
 #    notice's contract_key restated as the entity's, so notice and
 #    entity never disagree on identity.
+#
+#    "Latest" is the chain's order first, the calendar's second. A
+#    notice that another notice of this contract names in its own
+#    back-link has been superseded, whatever the dates say: a same-day
+#    modification (eForms ids are random UUIDs, so the id tie-break was
+#    a coin flip — about half of the 245 same-day pairs on prod
+#    2026-09-27 came out backwards, and TED publication numbers split
+#    them 50/50 too), or an award republished as a later version after
+#    it was modified. Only back-links count: the retired
+#    link_ted_modifications wrote MODIFIES from every modification to
+#    every award of its procedure, dates regardless, and those edges
+#    order nothing. Among the notices nothing supersedes, the newest
+#    publication date wins, then the id, so the result stays a function
+#    of the chain and not of arrival order.
 CHAIN_ROLLUP_CYPHER = (
     "UNWIND $rows AS row "
     "MATCH (:Notice { ted_notice_id: row.nid })-[:NOTICE_OF]->(e:Contract) "
     "WITH DISTINCT e "
     "MATCH (e)<-[:NOTICE_OF]-(x:Notice) "
-    "WITH e, x ORDER BY coalesce(x.publication_date, '') DESC, x.ted_notice_id DESC "
+    "WITH e, x, EXISTS { (y:Notice)-[:MODIFIES]->(x) "
+    "WHERE (y)-[:NOTICE_OF]->(e) AND (y.modifies_notice_id = x.ted_notice_id "
+    "OR y.modifies_publication_number = x.ted_publication_number) } AS superseded "
+    "WITH e, x ORDER BY superseded, coalesce(x.publication_date, '') DESC, "
+    "x.ted_notice_id DESC "
     "WITH e, collect(x) AS ordered "
     "WITH e, ordered, ordered[0] AS latest, "
     "[x IN ordered WHERE x.value_eur IS NOT NULL] AS valued, "
@@ -185,6 +208,30 @@ CHAIN_ROLLUP_CYPHER = (
     "x.contract_key = e.contract_key)"
 )
 
+def render_contract_chain(p: dict) -> CypherWrite:
+    """The contract-chain step for one native notice, applied by the
+    sink after the notice, its entity and its NOTICE_OF edge exist
+    (see Neo4jSink._apply_contract_chains).
+
+    A modification carries its back-link (BT-1501) in one of two forms;
+    the sink resolves it against the graph on write — never against
+    TED — so the MODIFIES edge exists from the first event, not from a
+    later linking pass. An award resolves the reverse direction too, so
+    a late-arriving award picks up modifications already in the graph.
+    Every notice of the chain then shares ONE :Contract entity, the
+    root award's (its key), and the entity's roll-up fields are
+    recomputed from the chain. Replay from seq 0 converges: the
+    outcome depends on the chain, not on arrival order.
+
+    Only the notice id travels: the chain step reads the back-link off
+    the version-guarded :Notice, never off this (possibly older) emit."""
+    return CypherWrite(
+        label="_ContractChain",
+        primary_key={"ted_notice_id": p["ted_notice_id"]},
+        set_props={},
+    )
+
+
 def judge_candidates(records) -> tuple[list[dict], list[dict]]:
     """(links to write, links to refuse) from CHAIN_CANDIDATES_CYPHER
     rows. Each is {m, t, status, reason} — m modifies t."""
@@ -226,11 +273,7 @@ def apply_contract_chains(driver, writes: list[CypherWrite]) -> None:
     idempotent, so a redelivered batch converges."""
     if not writes:
         return
-    rows = [{
-        "nid": w.primary_key["ted_notice_id"],
-        "prev_nid": w.set_props.get("modifies_notice_id"),
-        "prev_pub": w.set_props.get("modifies_publication_number"),
-    } for w in writes]
+    rows = [{"nid": w.primary_key["ted_notice_id"]} for w in writes]
     with driver.session() as session:
         link_notices(session, rows)
         for row in rows:
