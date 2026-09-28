@@ -14,7 +14,7 @@ from neo4j_sink import repair_chains
 from neo4j_sink.repair_chains import IRI, Repairer
 from tests.test_repair_chains_plan import FakeLog
 from tests.test_contract_chain_replay import (  # noqa: F401  (fixtures)
-    _assert_two_separate_contracts, _award, _bulgarian_award,
+    _assert_two_separate_contracts, _award, _bulgarian_award, _framework,
     _bulgarian_mod_with_the_typo, _events, _german_award, _german_mod, _mod,
     _state, neo4j, pytestmark, sink,
 )
@@ -311,3 +311,27 @@ def test_versions_replays_the_newest_version_over_an_older_one(sink, neo4j):
                     "e.current_value AS current").single()
     assert (row["v"], row["value"], row["current"]) == ("02", 1200.0, 1200.0)
     assert not repairer.versions_behind()
+
+
+def test_readopt_folds_what_the_old_refusal_left_hanging(sink, neo4j):
+    """The state the old adopt left on prod: the modification adopted
+    onto the 2023 award's entity, and hanging off its own procedure's
+    entity too, where the silent eForms lot award kept it."""
+    _, driver = neo4j
+    legacy, lot, mod = _framework()
+    sink.handle(_events(legacy, mod))
+    with driver.session() as s:
+        s.run("CREATE (p:Contract {contract_key: 'FD58'}) WITH p "
+              "MATCH (m:Notice {ted_notice_id: 'MOD'}) MERGE (m)-[:NOTICE_OF]->(p)")
+    sink.handle(_events(lot, start=3))       # the silent award lands on FD58 only
+    repairer = Repairer(sink, FakeLog())
+    with driver.session() as s:              # recreate the dual home the old sink left
+        s.run("MATCH (m:Notice {ted_notice_id: 'MOD'}), (p:Contract {contract_key: 'FD58'}) "
+              "MERGE (m)-[:NOTICE_OF]->(p)")
+    assert repairer.dual_homed_notices()
+
+    repairer.readopt(repairer.dual_homed_notices())
+    assert not repairer.dual_homed_notices()
+    state = _state(driver)
+    assert list(state["entities"]) == ["639879-2023"]
+    assert state["entities"]["639879-2023"]["notice_count"] == 3

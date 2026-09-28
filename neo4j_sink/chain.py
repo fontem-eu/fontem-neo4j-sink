@@ -98,18 +98,28 @@ CHAIN_REJECT_CYPHER = (
 # 2. Adopt. The chain is everything reachable over MODIFIES. Its root
 #    is the earliest award, or the earliest notice when no award has
 #    been ingested. Every other :Contract entity the chain's notices
-#    point at is folded INTO the root's entity — but only an entity that
-#    has no award of its own outside this chain. A modification whose
-#    back-link names another contract's award (a buyer's typo, a wrong
-#    reference) must not drag that whole contract into this one: both
-#    stay, and the split meter reports it. An entity whose awards are
-#    all in the chain (the same award re-stamped under a new key, or a
-#    modification-only entity) is folded in with apoc.refactor.mergeNodes,
-#    which keeps the root's properties and moves the edges — NOTICE_OF,
-#    AWARDED, AWARDED_TO, BID_ON — so nothing is lost. The root's entity
-#    is the one keyed by the root's own stamped contract_key: a notice
-#    re-stamped with a new key briefly has two NOTICE_OF edges, and the
-#    newly stamped identity must win.
+#    point at is folded INTO the root's entity with
+#    apoc.refactor.mergeNodes, which keeps the root's properties and
+#    moves the edges — NOTICE_OF, AWARDED, AWARDED_TO, BID_ON — so
+#    nothing is lost. The root's entity is the one keyed by the root's
+#    own stamped contract_key: a notice re-stamped with a new key
+#    briefly has two NOTICE_OF edges, and the newly stamped identity
+#    must win.
+#
+#    An entity is NOT folded when it holds an award outside the chain
+#    that explicitly disagrees with the root: an award in a different
+#    eForms procedure from the root's, an award that names some other
+#    notice in a back-link of its own, or any outside award while the
+#    chain rests on a back-link the link step marked doubtful. A silent
+#    outside award is not a disagreement. This used to refuse on ANY
+#    outside award, to stop a mistyped back-link dragging a whole
+#    contract along; the link step's plausibility check now catches
+#    those (0 of 42,986 eForms-ID back-links refused on prod,
+#    2026-09-28, 398 of 239,053 typed numbers), and the blanket refusal
+#    left notices hanging off two entities instead: 1,497 on prod,
+#    1,416 of them against an outside award that said nothing, e.g. a
+#    framework's pre-eForms lot awards and its eForms lot award plus a
+#    modification naming the former. Each re-emit re-created them.
 #
 #    One notice per statement, not an UNWIND over the batch: a merge
 #    deletes a node, and a later row of the same statement that had
@@ -119,16 +129,21 @@ CHAIN_ADOPT_CYPHER = (
     "MATCH (n:Notice { ted_notice_id: $nid }) "
     "MATCH (n)-[:MODIFIES*0..30]-(x:Notice) "
     "WITH collect(DISTINCT x) AS chain "
-    "WITH chain, [x IN chain WHERE x.notice_kind = 'award'] AS awards "
-    "WITH chain, CASE WHEN size(awards) > 0 THEN awards ELSE chain END AS cands "
+    "WITH chain, [x IN chain WHERE x.notice_kind = 'award'] AS awards, "
+    "any(x IN chain WHERE x.back_link_status = 'doubtful') AS doubtful "
+    "WITH chain, doubtful, "
+    "CASE WHEN size(awards) > 0 THEN awards ELSE chain END AS cands "
     "UNWIND cands AS c "
-    "WITH chain, c ORDER BY coalesce(c.publication_date, ''), c.ted_notice_id "
-    "WITH chain, head(collect(c)) AS root "
+    "WITH chain, doubtful, c ORDER BY coalesce(c.publication_date, ''), c.ted_notice_id "
+    "WITH chain, doubtful, head(collect(c)) AS root "
     "MATCH (root)-[:NOTICE_OF]->(e:Contract { contract_key: root.contract_key }) "
     "UNWIND chain AS x "
     "MATCH (x)-[:NOTICE_OF]->(o:Contract) WHERE o <> e "
     "AND NOT EXISTS { (o)<-[:NOTICE_OF]-(a:Notice { notice_kind: 'award' }) "
-    "WHERE NOT a IN chain } "
+    "WHERE NOT a IN chain AND (doubtful "
+    "OR a.modifies_notice_id IS NOT NULL OR a.modifies_publication_number IS NOT NULL "
+    "OR (a.procedure_id IS NOT NULL AND root.procedure_id IS NOT NULL "
+    "AND a.procedure_id <> root.procedure_id)) } "
     "WITH DISTINCT e, o "
     "CALL apoc.refactor.mergeNodes([e, o], "
     "{properties: 'discard', mergeRels: true}) YIELD node "
