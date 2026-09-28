@@ -412,6 +412,36 @@ def test_a_doubtful_link_does_not_fold_in_a_procedure_with_its_own_award(sink, n
     assert state["notices"]["LOT"]["entities"] == ["FD58"]
 
 
+def test_two_entities_under_the_root_key_fold_into_one(sink, neo4j):
+    """A graph without contract_contract_key_unique (fontem-shared) can
+    hold the root's key twice. The adopt step must pick one root entity
+    and fold the other in, not merge each into the other and then read
+    the one it deleted ("Node not found")."""
+    _, driver = neo4j
+    legacy, lot, mod = _framework()
+    sink.handle(_events(legacy, lot, mod))
+    with driver.session() as s:
+        s.run("DROP CONSTRAINT contract_contract_key_unique IF EXISTS")
+    try:
+        with driver.session() as s:
+            s.run("CREATE (d:Contract {contract_key: '639879-2023'}) WITH d "
+                  "MATCH (n:Notice) WHERE n.ted_notice_id IN ['639879-2023', 'MOD'] "
+                  "MERGE (n)-[:NOTICE_OF]->(d)")
+        sink.handle(_events(mod, start=4))
+        with driver.session() as s:
+            n = s.run("MATCH (c:Contract {contract_key: '639879-2023'}) "
+                      "RETURN count(c) AS n").single()["n"]
+        assert n == 1
+        state = _state(driver)
+        assert state["notices"]["MOD"]["entities"] == ["639879-2023"]
+        assert state["notices"]["639879-2023"]["entities"] == ["639879-2023"]
+    finally:
+        with driver.session() as s:
+            s.run("MATCH (n) DETACH DELETE n")
+            s.run("CREATE CONSTRAINT contract_contract_key_unique IF NOT EXISTS "
+                  "FOR (c:Contract) REQUIRE c.contract_key IS UNIQUE")
+
+
 # ── a back-link is judged before it may link ──────────────────────
 
 
