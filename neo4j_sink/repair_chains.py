@@ -603,19 +603,21 @@ def _unlink(repairer: Repairer, apply: bool) -> int:
         print(f"{repairer.count_stray()} stray MODIFIES edges to delete")
         return 0
     touched = repairer.unlink_stray()
-    rebuilt = 0
+    rebuilt, stuck = 0, 0
     for key in touched:
         plan = repairer.plan(key)
         if not plan.changes_anything:
             continue
         print(plan.describe())
         if plan.missing:
+            stuck += 1
             continue
         repairer.rebuild(plan)
         rebuilt += 1
     print(f"deleted the stray MODIFIES edges: {len(touched)} entities rolled up, "
-          f"{rebuilt} rebuilt")
-    return 0
+          f"{rebuilt} rebuilt, {stuck} left: a notice is missing from the log")
+    # Non-zero when an entity needed rebuilding and could not be.
+    return 1 if stuck else 0
 
 
 def _versions(repairer: Repairer, apply: bool) -> int:

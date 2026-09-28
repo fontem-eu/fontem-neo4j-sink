@@ -410,11 +410,11 @@ def test_unlink_rebuilds_only_what_the_edges_alone_held_together(monkeypatch, ca
                         missing=["c"])
     repairer = _cli(monkeypatch, {"K": _broken(), "H": whole, "M": unreplayable},
                     touched=["H", "K", "M"])
-    assert repair_chains.main(["unlink", "--stray", "--apply"]) == 0
+    assert repair_chains.main(["unlink", "--stray", "--apply"]) == 1   # M is stuck
     assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["K"]
     out = capsys.readouterr().out
     assert "entity K" in out and "NOT REBUILDABLE" in out and "entity H" not in out
-    assert "3 entities rolled up, 1 rebuilt" in out
+    assert "3 entities rolled up, 1 rebuilt, 1 left" in out
 
 
 def test_rollup_counts_without_apply_and_rolls_up_with_it(monkeypatch, capsys):
