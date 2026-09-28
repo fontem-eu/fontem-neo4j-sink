@@ -176,6 +176,14 @@ _STALE_ORDER_CYPHER = (
     "WITH e, head(collect(t.ted_notice_id)) AS nid "
     "RETURN e.contract_key AS key, nid"
 )
+# Of those, the entities that SHOW a superseded notice as current: what
+# the roll-up must bring to zero (only a mutual back-link can keep one).
+_SUPERSEDED_CURRENT_CYPHER = (
+    "MATCH (m:Notice)-[:MODIFIES]->(t:Notice { is_current: true }) "
+    f"WHERE {_NAMED} "
+    "MATCH (m)-[:NOTICE_OF]->(e:Contract)<-[:NOTICE_OF]-(t) "
+    "RETURN count(DISTINCT e) AS n"
+)
 _NOTICES_CYPHER = (
     "MATCH (n:Notice)-[:NOTICE_OF]->(:Contract { contract_key: $key }) "
     "RETURN n.ted_notice_id AS nid"
@@ -460,6 +468,10 @@ class Repairer:
                 for nid, seq, payload in notices[i:i + _REPLAY_BATCH]
             ])
 
+    def superseded_current(self) -> int:
+        with self._driver.session() as s:
+            return s.run(_SUPERSEDED_CURRENT_CYPHER).single()["n"]
+
     def roll_up(self, nids: list[str]) -> None:
         """The sink's own roll-up (chain.CHAIN_ROLLUP_CYPHER), nothing
         else: a notice id stands for its entity."""
@@ -634,7 +646,9 @@ def _rollup(repairer: Repairer, apply: bool) -> int:
     stale = repairer.stale_order()
     if apply:
         repairer.roll_up([row["nid"] for row in stale])
-    print(f"{len(stale)} entities {'rolled up' if apply else 'to roll up'}")
+    print(f"{len(stale)} entities where a back-link and the dates disagree"
+          f"{', rolled up' if apply else ''}; "
+          f"{repairer.superseded_current()} show a superseded notice as current")
     return 0
 
 
