@@ -8,6 +8,7 @@
     python -m neo4j_sink.repair_chains unlink  --stray --apply
     python -m neo4j_sink.repair_chains rollup  --stale-order --apply
     python -m neo4j_sink.repair_chains versions --apply
+    python -m neo4j_sink.repair_chains readopt --dual-homed --apply
 
 Run it where the sink runs (it needs the sink's environment: NEO4J_*,
 EVENTS_DATABASE_URL):
@@ -63,6 +64,12 @@ since, still shows the old "latest"; `rollup --stale-order` re-runs
 the sink's own roll-up on every entity where a back-link and the
 dates disagree.
 
+READOPT. The adopt step used to refuse any entity that held an award
+outside the chain, so a notice whose own key's entity held a silent
+award of the same procedure hung off both. Adopt now refuses only an
+explicit disagreement (chain.CHAIN_ADOPT_CYPHER); `readopt` runs that
+step, and the roll-up, on every notice with more than one NOTICE_OF.
+
 VERSIONS. An eForms notice republished as v02 shares its node with
 v01, and until the sink guarded that node by notice_version a rescan
 that re-emitted v01 after v02 left v01 in the graph (376 notices on
@@ -88,7 +95,7 @@ import psycopg
 from fontem_event_schemas import EventEnvelope
 from fontem_events.consumer import ConsumerConfig
 
-from .chain import CHAIN_ROLLUP_CYPHER
+from .chain import CHAIN_ADOPT_CYPHER, CHAIN_ROLLUP_CYPHER
 from .cypher import _ROLLUP_ONLY_KEYS, _notice_kind, notice_parties
 from .plausibility import REJECT, assess_link
 
@@ -150,6 +157,10 @@ _KEYS_OF_CYPHER = (
     "UNWIND $nids AS nid "
     "MATCH (:Notice { ted_notice_id: nid })-[:NOTICE_OF]->(e:Contract) "
     "RETURN DISTINCT e.contract_key AS key"
+)
+_DUAL_HOMED_NOTICES_CYPHER = (
+    "MATCH (x:Notice) WHERE COUNT { (x)-[:NOTICE_OF]->() } > 1 "
+    "RETURN x.ted_notice_id AS nid"
 )
 _DUAL_HOMED_CYPHER = (
     "MATCH (x:Notice) WHERE COUNT { (x)-[:NOTICE_OF]->() } > 1 "
@@ -415,6 +426,18 @@ class Repairer:
         with self._driver.session() as s:
             return [r["key"] for r in s.run(_DUAL_HOMED_CYPHER)]
 
+    def dual_homed_notices(self) -> list[str]:
+        with self._driver.session() as s:
+            return [r["nid"] for r in s.run(_DUAL_HOMED_NOTICES_CYPHER)]
+
+    def readopt(self, nids: list[str]) -> None:
+        """The sink's own adopt step, one notice per statement as the
+        sink runs it (a merge deletes a node), then the roll-up."""
+        with self._driver.session() as s:
+            for nid in nids:
+                s.run(CHAIN_ADOPT_CYPHER, nid=nid)
+        self.roll_up(nids)
+
     def count_stray(self) -> int:
         with self._driver.session() as s:
             return s.run(_COUNT_STRAY_CYPHER).single()["n"]
@@ -588,6 +611,11 @@ def _parser() -> argparse.ArgumentParser:
     rollup.add_argument("--stale-order", action="store_true", required=True)
     rollup.add_argument("--apply", action="store_true",
                         help="without it, count the entities and change nothing")
+    readopt = sub.add_parser("readopt", help="re-run the adopt step on every "
+                                             "notice with more than one NOTICE_OF")
+    readopt.add_argument("--dual-homed", action="store_true", required=True)
+    readopt.add_argument("--apply", action="store_true",
+                         help="without it, count them and change nothing")
     versions = sub.add_parser("versions", help="replay the newest version of every "
                                                "notice the graph holds an older one of")
     versions.add_argument("--apply", action="store_true",
@@ -632,6 +660,16 @@ def _unlink(repairer: Repairer, apply: bool) -> int:
     return 1 if stuck else 0
 
 
+def _readopt(repairer: Repairer, apply: bool) -> int:
+    nids = repairer.dual_homed_notices()
+    print(f"{len(nids)} notices hang off more than one entity")
+    if apply:
+        repairer.readopt(nids)
+        print(f"re-adopted; {len(repairer.dual_homed_notices())} still do "
+              f"(an explicit disagreement keeps them apart)")
+    return 0
+
+
 def _versions(repairer: Repairer, apply: bool) -> int:
     behind = repairer.versions_behind()
     for nid, _seq, payload in behind:
@@ -664,6 +702,8 @@ def main(argv: "list[str] | None" = None) -> int:
         return _unlink(repairer, apply)
     if args.cmd == "versions":
         return _versions(repairer, apply)
+    if args.cmd == "readopt":
+        return _readopt(repairer, apply)
 
     keys = list(getattr(args, "entity", []))
     dual = getattr(args, "dual_homed", False)

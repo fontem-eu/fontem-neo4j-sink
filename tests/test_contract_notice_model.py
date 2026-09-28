@@ -621,9 +621,13 @@ def test_chain_cypher_resolves_back_links_by_indexed_seeks_not_or():
     assert ("MATCH (root)-[:NOTICE_OF]->(e:Contract "
             "{ contract_key: root.contract_key })" in adopt)
     assert "{properties: 'discard', mergeRels: true}" in adopt
-    # never fold in an entity that has an award of its own outside the chain
+    # never fold in an entity whose award outside the chain disagrees with
+    # the root; a silent outside award does not block
     assert ("NOT EXISTS { (o)<-[:NOTICE_OF]-(a:Notice { notice_kind: 'award' }) "
-            "WHERE NOT a IN chain }" in adopt)
+            "WHERE NOT a IN chain AND (doubtful " in adopt)
+    assert ("a.procedure_id IS NOT NULL AND root.procedure_id IS NOT NULL "
+            "AND a.procedure_id <> root.procedure_id" in adopt)
+    assert "a.modifies_notice_id IS NOT NULL" in adopt
     assert "UNWIND $rows" not in adopt
     rollup = chain_mod.CHAIN_ROLLUP_CYPHER
     assert "SET x.is_current = (x = latest)" in rollup

@@ -341,6 +341,77 @@ def test_wrong_back_link_never_merges_two_contracts(sink, neo4j):
     assert _state(driver) == state
 
 
+# ── adoption: only an explicit disagreement keeps entities apart ──
+
+
+def _framework():
+    """A Spanish framework in lots (639879-2023 on prod): lot awards
+    published in the pre-eForms format, a later lot award in eForms
+    under the procedure the eForms era gave it, and an eForms
+    modification of the first naming it by number."""
+    legacy = _award(ted_notice_id="639879-2023", ted_publication_number="639879-2023",
+                    contract_key="639879-2023", procedure_id=None, notice_version=None,
+                    publication_date="2023-10-23", value_eur=64520.25,
+                    legacy_procedure_id="SE/18/23")
+    lot = _award(ted_notice_id="LOT", ted_publication_number="695224-2023",
+                 contract_key="FD58", procedure_id="FD58",
+                 publication_date="2023-11-16", value_eur=10200.0)
+    mod = _mod("MOD", ted_publication_number="400000-2024", contract_key="FD58",
+               procedure_id="FD58", modifies_publication_number="639879-2023",
+               publication_date="2024-07-09", value_eur=70000.0)
+    return legacy, lot, mod
+
+
+def test_a_silent_award_of_the_procedure_does_not_split_the_contract(sink, neo4j):
+    """The eForms lot award names nothing: it does not disagree with
+    the 2023 award, so its procedure's entity folds into the chain and
+    every notice hangs off exactly one entity, whatever the order."""
+    _, driver = neo4j
+    legacy, lot, mod = _framework()
+    for order in ((legacy, lot, mod), (mod, lot, legacy), (lot, mod, legacy),
+                  (legacy, mod, lot)):
+        with driver.session() as s:
+            s.run("MATCH (n) DETACH DELETE n")
+        sink.handle(_events(*order))
+        state = _state(driver)
+        assert list(state["entities"]) == ["639879-2023"], order
+        assert {n: v["entities"] for n, v in state["notices"].items()} == {
+            "639879-2023": ["639879-2023"], "LOT": ["639879-2023"],
+            "MOD": ["639879-2023"]}, order
+        assert state["modifies"] == [("MOD", "639879-2023")]
+        assert state["entities"]["639879-2023"]["notice_count"] == 3
+
+
+def test_a_re_emit_does_not_hang_the_notice_off_two_entities(sink, neo4j):
+    """What grew grain.notice_belongs_to_one_contract on prod: every
+    re-emit MERGEs NOTICE_OF to the notice's own key again."""
+    _, driver = neo4j
+    legacy, lot, mod = _framework()
+    sink.handle(_events(legacy, lot, mod))
+    sink.handle(_events(mod, lot, start=4))
+    with driver.session() as s:
+        dual = s.run("MATCH (x:Notice) WHERE COUNT { (x)-[:NOTICE_OF]->() } > 1 "
+                     "RETURN count(x) AS n").single()["n"]
+    assert dual == 0
+    assert list(_state(driver)["entities"]) == ["639879-2023"]
+
+
+def test_a_doubtful_link_does_not_fold_in_a_procedure_with_its_own_award(sink, neo4j):
+    """Nothing carries over from the 2023 award to the modification (the
+    link step marks it doubtful) and the procedure holds an award of its
+    own: that is not enough to fuse the two."""
+    _, driver = neo4j
+    legacy, lot, mod = _framework()
+    mod.update(authority_id="someone-else", company_gmr_id="another-firm",
+               title="Ersatzneubau Sporthalle Illingen")
+    lot.update(authority_id="someone-else", company_gmr_id="another-firm")
+    sink.handle(_events(legacy, lot, mod))
+    state = _state(driver)
+    assert sorted(state["entities"]) == ["639879-2023", "FD58"]
+    assert state["notices"]["MOD"]["entities"] == ["FD58"]
+    assert state["notices"]["LOT"]["entities"] == ["FD58"]
+
+
 # ── a back-link is judged before it may link ──────────────────────
 
 

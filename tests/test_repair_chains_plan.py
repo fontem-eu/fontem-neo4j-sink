@@ -336,6 +336,7 @@ def _cli(monkeypatch, plans, **found):
     repairer.unlink_stray.return_value = list(found.get("touched", ()))
     repairer.versions_behind.return_value = [("N", 9, {"notice_version": "02"})]
     repairer.superseded_current.return_value = 0
+    repairer.dual_homed_notices.side_effect = [["x", "y"], []]
     repairer.count_stray.return_value = 7
     repairer.plan.side_effect = lambda key: plans[key]
     repairer.rebuild.return_value = [{"key": "K", "ours": 2, "notices": 2,
@@ -438,3 +439,11 @@ def test_versions_lists_without_apply_and_replays_with_it(monkeypatch, capsys):
     assert repair_chains.main(["versions", "--apply"]) == 0
     repairer.replay.assert_called_once_with([("N", 9, {"notice_version": "02"})])
     assert "1 notices replayed at their newest version" in capsys.readouterr().out
+
+
+def test_readopt_counts_without_apply_and_readopts_with_it(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {})
+    assert repair_chains.main(["readopt", "--dual-homed", "--apply"]) == 0
+    repairer.readopt.assert_called_once_with(["x", "y"])
+    out = capsys.readouterr().out
+    assert "2 notices hang off more than one entity" in out and "0 still do" in out
