@@ -77,6 +77,8 @@ class FakeGraph:
         self.queries.append(query)
         if query == repair_chains._STRAY_CYPHER:
             rows = [{"n": self._stray}]
+        elif query == repair_chains._TWINS_CYPHER:
+            rows = [{"n": 1}]
         elif query == repair_chains._GRAPH_VERSIONS_CYPHER:
             rows = self._resolved
         elif query == repair_chains._NOTICES_CYPHER:
@@ -331,6 +333,7 @@ def _cli(monkeypatch, plans, **found):
     repairer = mock.Mock()
     repairer.suspects.return_value = [{"key": k} for k in found.get("suspects", ())]
     repairer.dual_homed.return_value = list(found.get("dual", ()))
+    repairer.duplicate_keys.return_value = list(found.get("dupes", ()))
     repairer.stale_order.return_value = [{"key": k, "nid": f"n-{k}"}
                                          for k in found.get("stale", ())]
     repairer.unlink_stray.return_value = list(found.get("touched", ()))
@@ -447,3 +450,13 @@ def test_readopt_counts_without_apply_and_readopts_with_it(monkeypatch, capsys):
     repairer.readopt.assert_called_once_with(["x", "y"])
     out = capsys.readouterr().out
     assert "2 notices hang off more than one entity" in out and "0 still do" in out
+
+
+def test_duplicate_keys_rebuild_the_keys_held_twice(monkeypatch, capsys):
+    twinned = Plan("T", payloads={"a": {"contract_key": "T", "ted_notice_id": "a"}},
+                   twins=2)
+    assert twinned.changes_anything and "2 :Contract nodes hold this key" in twinned.describe()
+    repairer = _cli(monkeypatch, {"T": twinned}, dupes=["T"])
+    assert repair_chains.main(["rebuild", "--duplicate-keys", "--apply"]) == 0
+    assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["T"]
+    capsys.readouterr()
