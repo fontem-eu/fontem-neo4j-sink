@@ -335,3 +335,36 @@ def test_readopt_folds_what_the_old_refusal_left_hanging(sink, neo4j):
     state = _state(driver)
     assert list(state["entities"]) == ["639879-2023"]
     assert state["entities"]["639879-2023"]["notice_count"] == 3
+
+
+def test_a_key_held_by_two_nodes_is_rebuilt_as_one(sink, neo4j):
+    """fontem-shared, 2026-09-28: 12 keys on two :Contract nodes each,
+    the same notice on both. The graph needs the constraint dropped to
+    get there; the rebuild leaves one node, and the constraint can come
+    back."""
+    _, driver = neo4j
+    log = FakeLog()
+    award = _award()
+    log.add(award)
+    sink.handle(_events(award))
+    with driver.session() as s:
+        s.run("DROP CONSTRAINT contract_contract_key_unique IF EXISTS")
+    try:
+        with driver.session() as s:
+            s.run("CREATE (d:Contract {contract_key: 'P1', notice_count: 1}) WITH d "
+                  "MATCH (n:Notice {ted_notice_id: 'A'}) MERGE (n)-[:NOTICE_OF]->(d)")
+        repairer = Repairer(sink, log)
+        assert repairer.duplicate_keys() == ["P1"]
+        plan = repairer.plan("P1")
+        assert plan.twins == 2 and plan.changes_anything and list(plan.payloads) == ["A"]
+        repairer.rebuild(plan)
+        assert repairer.duplicate_keys() == []
+        state = _state(driver)
+        assert list(state["entities"]) == ["P1"]
+        assert state["notices"]["A"]["entities"] == ["P1"]
+        assert state["entities"]["P1"]["notice_count"] == 1
+    finally:
+        with driver.session() as s:
+            s.run("MATCH (n) DETACH DELETE n")
+            s.run("CREATE CONSTRAINT contract_contract_key_unique IF NOT EXISTS "
+                  "FOR (c:Contract) REQUIRE c.contract_key IS UNIQUE")

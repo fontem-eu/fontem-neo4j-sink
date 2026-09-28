@@ -9,6 +9,7 @@
     python -m neo4j_sink.repair_chains rollup  --stale-order --apply
     python -m neo4j_sink.repair_chains versions --apply
     python -m neo4j_sink.repair_chains readopt --dual-homed --apply
+    python -m neo4j_sink.repair_chains rebuild --duplicate-keys --apply
 
 Run it where the sink runs (it needs the sink's environment: NEO4J_*,
 EVENTS_DATABASE_URL):
@@ -63,6 +64,14 @@ ORDER. The roll-up orders a contract by its chain before its dates
 since, still shows the old "latest"; `rollup --stale-order` re-runs
 the sink's own roll-up on every entity where a back-link and the
 dates disagree.
+
+DUPLICATE KEYS. A graph without contract_contract_key_unique can hold
+one contract_key on two :Contract nodes (fontem-shared, 2026-09-28: 12
+keys, each twin carrying the same notice). Such a key plans as a
+rebuild: the take-apart deletes every node under it and the replay
+MERGEs one back. `--duplicate-keys` finds them; with none left, the
+constraint migration (migrations/contract_notice_constraints_2026_07)
+can run.
 
 READOPT. The adopt step used to refuse any entity that held an award
 outside the chain, so a notice whose own key's entity held a silent
@@ -158,6 +167,11 @@ _KEYS_OF_CYPHER = (
     "MATCH (:Notice { ted_notice_id: nid })-[:NOTICE_OF]->(e:Contract) "
     "RETURN DISTINCT e.contract_key AS key"
 )
+_TWINS_CYPHER = "MATCH (c:Contract { contract_key: $key }) RETURN count(c) AS n"
+_DUPLICATE_KEYS_CYPHER = (
+    "MATCH (c:Contract) WHERE c.contract_key IS NOT NULL "
+    "WITH c.contract_key AS key, count(*) AS n WHERE n > 1 RETURN key"
+)
 _DUAL_HOMED_NOTICES_CYPHER = (
     "MATCH (x:Notice) WHERE COUNT { (x)-[:NOTICE_OF]->() } > 1 "
     "RETURN x.ted_notice_id AS nid"
@@ -216,7 +230,7 @@ _TAKE_APART_CYPHER = (
     "WITH n, keys OPTIONAL MATCH (n)-[r:NOTICE_OF]->() DELETE r "
     "WITH DISTINCT keys "
     "MATCH (e:Contract { contract_key: $key }) DETACH DELETE e "
-    "RETURN keys"
+    "RETURN DISTINCT keys"
 )
 # An entity the rebuild left without a single notice has no provenance.
 _DROP_HUSKS_CYPHER = (
@@ -313,6 +327,9 @@ class Plan:  # pylint: disable=too-many-instance-attributes
     rekeyed: dict[str, str] = field(default_factory=dict)
     # MODIFIES edges on these notices that no back-link names.
     stray: int = 0
+    # :Contract nodes holding this key (more than one only without the
+    # uniqueness constraint).
+    twins: int = 1
 
     @property
     def groups(self) -> dict[str, list[str]]:
@@ -360,7 +377,7 @@ class Plan:  # pylint: disable=too-many-instance-attributes
         stray link alone is not a reason: `unlink` deletes it without
         moving a notice."""
         return (len(self.contracts) > 1 or bool(self.rekeyed) or self.stale_key
-                or any(r["linked"] for r in self.refused))
+                or self.twins > 1 or any(r["linked"] for r in self.refused))
 
     def describe(self) -> str:
         lines = [f"entity {self.key}: {len(self.payloads)} notices"]
@@ -373,6 +390,8 @@ class Plan:  # pylint: disable=too-many-instance-attributes
                          f"{'' if r['linked'] else ' (already unlinked)'}: {r['reason']}")
         for nid, key in self.rekeyed.items():
             lines.append(f"  re-key {nid}: back-link key -> {key}")
+        if self.twins > 1:
+            lines.append(f"  {self.twins} :Contract nodes hold this key: rebuilt as one")
         if self.stale_key:
             lines.append(f"  no notice is keyed {self.key}: the entity outlived its "
                          f"identity, each notice goes to its own key")
@@ -425,6 +444,10 @@ class Repairer:
     def dual_homed(self) -> list[str]:
         with self._driver.session() as s:
             return [r["key"] for r in s.run(_DUAL_HOMED_CYPHER)]
+
+    def duplicate_keys(self) -> list[str]:
+        with self._driver.session() as s:
+            return [r["key"] for r in s.run(_DUPLICATE_KEYS_CYPHER)]
 
     def dual_homed_notices(self) -> list[str]:
         with self._driver.session() as s:
@@ -506,7 +529,8 @@ class Repairer:
     def plan(self, key: str) -> Plan:
         plan = Plan(key)
         with self._driver.session() as s:
-            nids = [r["nid"] for r in s.run(_NOTICES_CYPHER, key=key)]
+            nids = list(dict.fromkeys(r["nid"] for r in s.run(_NOTICES_CYPHER, key=key)))
+            plan.twins = s.run(_TWINS_CYPHER, key=key).single()["n"]
             if len(nids) > _MAX_NOTICES:
                 raise SystemExit(f"{key} has {len(nids)} notices; that is not a "
                                  f"contract, look at it by hand first")
@@ -598,6 +622,8 @@ def _parser() -> argparse.ArgumentParser:
                        help="every entity `scan` says needs repair")
         p.add_argument("--dual-homed", action="store_true",
                        help="the entities of notices with more than one NOTICE_OF")
+        p.add_argument("--duplicate-keys", action="store_true",
+                       help="every contract_key held by more than one :Contract")
         if name == "rebuild":
             p.add_argument("--apply", action="store_true",
                            help="without it, print the plan and change nothing")
@@ -709,6 +735,8 @@ def main(argv: "list[str] | None" = None) -> int:
     dual = getattr(args, "dual_homed", False)
     if dual:
         keys += repairer.dual_homed()
+    if getattr(args, "duplicate_keys", False):
+        keys += repairer.duplicate_keys()
     if (args.cmd == "scan" and not dual) or getattr(args, "suspects", False):
         keys += [s["key"] for s in repairer.suspects()]
     if not keys:
