@@ -4,6 +4,10 @@
     python -m neo4j_sink.repair_chains plan    --entity 260030-2022
     python -m neo4j_sink.repair_chains rebuild --entity 260030-2022 --apply
     python -m neo4j_sink.repair_chains rebuild --suspects --apply
+    python -m neo4j_sink.repair_chains rebuild --dual-homed --apply
+    python -m neo4j_sink.repair_chains unlink  --stray --apply
+    python -m neo4j_sink.repair_chains rollup  --stale-order --apply
+    python -m neo4j_sink.repair_chains versions --apply
 
 Run it where the sink runs (it needs the sink's environment: NEO4J_*,
 EVENTS_DATABASE_URL):
@@ -35,7 +39,39 @@ the number it says it modifies), so a wrong number puts it on the
 wrong entity by key, link or no link. When the rule rejects such a
 back-link, the notice is replayed under its own publication number.
 
-`rebuild` without --apply prints the plan and changes nothing.
+STRAY LINKS. The retired link_ted_modifications wrote a MODIFIES edge
+from every modification to every award of its procedure, whatever
+the dates and whatever the notice itself named. No fresh ingest makes
+those edges (the sink links by back-link only). `unlink --stray`
+deletes them and rolls the entities up again. It does not rebuild
+them: almost every such edge joins notices of one procedure, which
+share a key and so are one contract anyway (15,298 of 19,603 on prod,
+2026-09-28). An entity that the deleted edge alone held together now
+plans as more than one contract, and `unlink` rebuilds exactly those.
+
+STALE KEYS. The pre-single-path loader keyed some eForms notices by
+their own UUID; re-stamped with their procedure id, they came to hang
+off both entities (grain.notice_belongs_to_one_contract). An entity
+keyed by something none of its notices is keyed by has outlived its
+identity, so the plan rebuilds it and each notice lands on its own
+key. `--dual-homed` finds the entities of every notice with more than
+one NOTICE_OF.
+
+ORDER. The roll-up orders a contract by its chain before its dates
+(chain.py). An entity rolled up before that rule, and not written
+since, still shows the old "latest"; `rollup --stale-order` re-runs
+the sink's own roll-up on every entity where a back-link and the
+dates disagree.
+
+VERSIONS. An eForms notice republished as v02 shares its node with
+v01, and until the sink guarded that node by notice_version a rescan
+that re-emitted v01 after v02 left v01 in the graph (376 notices on
+prod, 2026-09-27). `versions` replays the newest version of every
+notice whose graph copy is older. Finding the multi-version notices
+is one full scan of the event log (about 11 minutes on prod).
+
+`rebuild`, `unlink`, `rollup` and `versions` without --apply print what
+they would do and change nothing.
 """
 from __future__ import annotations
 
@@ -82,6 +118,63 @@ _SUSPECTS_CYPHER = (
     "WITH e, collect(DISTINCT a.country) AS countries "
     "WHERE size([c IN countries WHERE c IS NOT NULL]) > 1 "
     "RETURN e.contract_key AS key, countries"
+)
+# A MODIFIES edge the modifying notice's own back-link names: exactly
+# what the chain step resolves (chain.CHAIN_CANDIDATES_CYPHER). Anything
+# else came from the retired link_ted_modifications.
+_NAMED = ("coalesce(m.modifies_notice_id = t.ted_notice_id "
+          "OR m.modifies_publication_number = t.ted_publication_number, false)")
+_MULTI_VERSION_SQL = (
+    "SELECT payload->>'ted_notice_id' AS nid FROM events.entity_events "
+    "WHERE event_type = 'UpsertContract' AND payload ? 'notice_version' "
+    "GROUP BY 1 HAVING count(DISTINCT payload->>'notice_version') > 1"
+)
+_GRAPH_VERSIONS_CYPHER = (
+    "UNWIND $nids AS nid MATCH (n:Notice { ted_notice_id: nid }) "
+    "RETURN nid, n.notice_version AS v"
+)
+# One batch of stray edges: delete them, return the notices at either
+# end so their entities can be rolled up and planned.
+_UNLINK_STRAY_CYPHER = (
+    "MATCH (m:Notice)-[r:MODIFIES]->(t:Notice) "
+    f"WHERE NOT {_NAMED} "
+    "WITH r, m, t LIMIT $limit "
+    "DELETE r "
+    "RETURN collect(DISTINCT m.ted_notice_id) + collect(DISTINCT t.ted_notice_id) AS nids"
+)
+_COUNT_STRAY_CYPHER = (
+    "MATCH (m:Notice)-[r:MODIFIES]->(t:Notice) "
+    f"WHERE NOT {_NAMED} RETURN count(r) AS n"
+)
+_KEYS_OF_CYPHER = (
+    "UNWIND $nids AS nid "
+    "MATCH (:Notice { ted_notice_id: nid })-[:NOTICE_OF]->(e:Contract) "
+    "RETURN DISTINCT e.contract_key AS key"
+)
+_DUAL_HOMED_CYPHER = (
+    "MATCH (x:Notice) WHERE COUNT { (x)-[:NOTICE_OF]->() } > 1 "
+    "MATCH (x)-[:NOTICE_OF]->(e:Contract) "
+    "RETURN DISTINCT e.contract_key AS key"
+)
+# Seeks each notice and expands, rather than an OR over both ends of
+# every MODIFIES edge in the graph.
+_STRAY_CYPHER = (
+    "UNWIND $nids AS nid "
+    "MATCH (:Notice { ted_notice_id: nid })-[r:MODIFIES]-(:Notice) "
+    "WITH DISTINCT r WITH r, startNode(r) AS m, endNode(r) AS t "
+    f"WHERE NOT {_NAMED} "
+    "RETURN count(r) AS n"
+)
+# Entities where a back-link and the dates disagree: the modified notice
+# is dated on or after the notice that names it. Only there can the
+# chain-first order pick a different latest notice than dates did.
+_STALE_ORDER_CYPHER = (
+    "MATCH (m:Notice)-[:MODIFIES]->(t:Notice) "
+    "WHERE coalesce(t.publication_date, '') >= coalesce(m.publication_date, '') "
+    f"AND {_NAMED} "
+    "MATCH (m)-[:NOTICE_OF]->(e:Contract)<-[:NOTICE_OF]-(t) "
+    "WITH e, head(collect(t.ted_notice_id)) AS nid "
+    "RETURN e.contract_key AS key, nid"
 )
 _NOTICES_CYPHER = (
     "MATCH (n:Notice)-[:NOTICE_OF]->(:Contract { contract_key: $key }) "
@@ -180,8 +273,16 @@ def is_keyed_by_back_link(payload: dict) -> bool:
             and payload.get("contract_key") == payload["modifies_publication_number"])
 
 
+def _version_rank(raw) -> int:
+    """BT-757 "01", "02"… as a number; no version ranks below any."""
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
 @dataclass
-class Plan:
+class Plan:  # pylint: disable=too-many-instance-attributes
     """What rebuilding one entity would do. Pure data: `plan` prints
     it, `rebuild --apply` executes it."""
     key: str
@@ -191,6 +292,8 @@ class Plan:
     refused: list[dict] = field(default_factory=list)
     accepted: list[tuple[str, str]] = field(default_factory=list)
     rekeyed: dict[str, str] = field(default_factory=dict)
+    # MODIFIES edges on these notices that no back-link names.
+    stray: int = 0
 
     @property
     def groups(self) -> dict[str, list[str]]:
@@ -226,11 +329,18 @@ class Plan:
         return sorted(out.values(), key=len, reverse=True)
 
     @property
+    def stale_key(self) -> bool:
+        """No notice on the entity is keyed by the entity's key."""
+        return bool(self.payloads) and self.key not in self.groups
+
+    @property
     def changes_anything(self) -> bool:
         """A refused back-link stays declared on its notice for ever;
         it needs repair only while the graph still acts on it — the
-        edge exists, or the notices it joined share this entity."""
-        return (len(self.contracts) > 1 or bool(self.rekeyed)
+        edge exists, or the notices it joined share this entity. A
+        stray link alone is not a reason: `unlink` deletes it without
+        moving a notice."""
+        return (len(self.contracts) > 1 or bool(self.rekeyed) or self.stale_key
                 or any(r["linked"] for r in self.refused))
 
     def describe(self) -> str:
@@ -244,14 +354,20 @@ class Plan:
                          f"{'' if r['linked'] else ' (already unlinked)'}: {r['reason']}")
         for nid, key in self.rekeyed.items():
             lines.append(f"  re-key {nid}: back-link key -> {key}")
+        if self.stale_key:
+            lines.append(f"  no notice is keyed {self.key}: the entity outlived its "
+                         f"identity, each notice goes to its own key")
+        if self.stray:
+            lines.append(f"  {self.stray} MODIFIES edge(s) no back-link names "
+                         f"(the retired link_ted_modifications; `unlink --stray`)")
         for nids in self.contracts:
             sample = self.payloads[nids[0]]
             keys = sorted({self.payloads[n]["contract_key"] for n in nids})
             lines.append(f"  contract of {len(nids)} notices [{sample.get('country')}] "
                          f"{(sample.get('title') or '')[:50]!r} keys={keys[:3]}")
         if not self.changes_anything and not self.missing:
-            lines.append("  nothing to repair: one contract, and no refused "
-                         "back-link is still linked")
+            lines.append("  nothing to rebuild: one contract under its own key, "
+                         "and no refused back-link is still linked")
         return "\n".join(lines)
 
 
@@ -266,18 +382,91 @@ class Repairer:
     # ── reading ───────────────────────────────────────────
 
     def whole_notice(self, nid: str) -> "tuple[int, dict] | None":
+        """The notice as its newest VERSION said it, not as its last
+        emit did: a rescan re-emits an eForms v01 after its v02, so the
+        latest event can be the older version. Among equal versions (and
+        for unversioned legacy notices) the latest event wins."""
+        best, best_rank = None, -2
         with self._pg.cursor() as cur:
             cur.execute(_EVENTS_SQL, (IRI.format(nid),))
             for seq, payload in cur.fetchall():
                 if isinstance(payload, str):
                     payload = json.loads(payload)
-                if not set(payload).issubset(_ROLLUP_ONLY_KEYS):
-                    return seq, with_identity(payload)
-        return None
+                if set(payload).issubset(_ROLLUP_ONLY_KEYS):
+                    continue
+                rank = _version_rank(payload.get("notice_version"))
+                if rank > best_rank:
+                    best, best_rank = (seq, with_identity(payload)), rank
+        return best
 
     def suspects(self) -> list[dict]:
         with self._driver.session() as s:
             return [r.data() for r in s.run(_SUSPECTS_CYPHER)]
+
+    def dual_homed(self) -> list[str]:
+        with self._driver.session() as s:
+            return [r["key"] for r in s.run(_DUAL_HOMED_CYPHER)]
+
+    def count_stray(self) -> int:
+        with self._driver.session() as s:
+            return s.run(_COUNT_STRAY_CYPHER).single()["n"]
+
+    def unlink_stray(self, limit: int = 1000) -> list[str]:
+        """Delete every stray MODIFIES edge, a batch per transaction,
+        and roll up what they touched. Returns the touched entity keys."""
+        touched: set[str] = set()
+        while True:
+            with self._driver.session() as s:
+                nids = s.run(_UNLINK_STRAY_CYPHER, limit=limit).single()["nids"]
+            if not nids:
+                break
+            nids = list(dict.fromkeys(nids))
+            self.roll_up(nids)
+            with self._driver.session() as s:
+                touched.update(r["key"] for r in s.run(_KEYS_OF_CYPHER, nids=nids))
+        return sorted(touched)
+
+    def stale_order(self) -> list[dict]:
+        """{key, nid}: one notice per entity whose order may be stale."""
+        with self._driver.session() as s:
+            return [r.data() for r in s.run(_STALE_ORDER_CYPHER)]
+
+    def versions_behind(self) -> "list[tuple[str, int, dict]]":
+        """(nid, seq, newest payload) for every notice the graph holds
+        at an older version than the log's newest."""
+        with self._pg.cursor() as cur:
+            cur.execute(_MULTI_VERSION_SQL)
+            nids = [row[0] for row in cur.fetchall()]
+        with self._driver.session() as s:
+            graph = {r["nid"]: r["v"] for r in s.run(_GRAPH_VERSIONS_CYPHER, nids=nids)}
+        behind = []
+        for nid in nids:
+            if nid not in graph:
+                continue
+            found = self.whole_notice(nid)
+            if found and (_version_rank(found[1].get("notice_version"))
+                          > _version_rank(graph[nid])):
+                behind.append((nid, *found))
+        return behind
+
+    def replay(self, notices: "list[tuple[str, int, dict]]") -> None:
+        """Feed whole notices back through the sink's write path."""
+        now = dt.datetime.now(dt.UTC)
+        for i in range(0, len(notices), _REPLAY_BATCH):
+            self._sink.handle([
+                EventEnvelope(event_type="UpsertContract", iri=IRI.format(nid),
+                              domain="contract", op="upsert", payload=payload,
+                              producer="repair_chains", ts=now, seq=seq)
+                for nid, seq, payload in notices[i:i + _REPLAY_BATCH]
+            ])
+
+    def roll_up(self, nids: list[str]) -> None:
+        """The sink's own roll-up (chain.CHAIN_ROLLUP_CYPHER), nothing
+        else: a notice id stands for its entity."""
+        with self._driver.session() as s:
+            for i in range(0, len(nids), _REPLAY_BATCH):
+                s.run(CHAIN_ROLLUP_CYPHER,
+                      rows=[{"nid": n} for n in nids[i:i + _REPLAY_BATCH]])
 
     def plan(self, key: str) -> Plan:
         plan = Plan(key)
@@ -297,6 +486,7 @@ class Repairer:
                     for nid, p in plan.payloads.items()
                     if p.get("modifies_notice_id") or p.get("modifies_publication_number")]
             resolved = [r.data() for r in s.run(_RESOLVE_CYPHER, refs=refs)]
+            plan.stray = s.run(_STRAY_CYPHER, nids=nids).single()["n"]
         for link in resolved:
             if link["target"] != link["m"]:
                 self._judge(plan, link["m"], link["target"], link["linked"])
@@ -337,15 +527,7 @@ class Repairer:
             touched_keys = set(touched["keys"] if touched else []) | {plan.key}
         ordered = sorted(nids, key=lambda n: (
             plan.payloads[n].get("publication_date") or "", n))
-        now = dt.datetime.now(dt.UTC)
-        for i in range(0, len(ordered), _REPLAY_BATCH):
-            self._sink.handle([
-                EventEnvelope(
-                    event_type="UpsertContract", iri=IRI.format(nid),
-                    domain="contract", op="upsert", payload=plan.payloads[nid],
-                    producer="repair_chains", ts=now, seq=plan.seqs[nid],
-                ) for nid in ordered[i:i + _REPLAY_BATCH]
-            ])
+        self.replay([(nid, plan.seqs[nid], plan.payloads[nid]) for nid in ordered])
         with self._driver.session() as s:
             dropped = s.run(_DROP_HUSKS_CYPHER, keys=sorted(touched_keys)).single()["dropped"]
             if dropped:
@@ -369,15 +551,35 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="repair_chains", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("scan", help="entities whose buyers span countries, judged from the log")
+    scan = sub.add_parser("scan", help="entities whose buyers span countries, "
+                                       "judged from the log")
+    scan.add_argument("--dual-homed", action="store_true",
+                      help="the entities of notices with more than one NOTICE_OF, "
+                           "instead of the country suspects")
     for name in ("plan", "rebuild"):
         p = sub.add_parser(name)
         p.add_argument("--entity", action="append", default=[], metavar="CONTRACT_KEY")
         p.add_argument("--suspects", action="store_true",
                        help="every entity `scan` says needs repair")
+        p.add_argument("--dual-homed", action="store_true",
+                       help="the entities of notices with more than one NOTICE_OF")
         if name == "rebuild":
             p.add_argument("--apply", action="store_true",
                            help="without it, print the plan and change nothing")
+    unlink = sub.add_parser("unlink", help="delete the MODIFIES edges no back-link "
+                                           "names, roll up, rebuild what they held")
+    unlink.add_argument("--stray", action="store_true", required=True)
+    unlink.add_argument("--apply", action="store_true",
+                        help="without it, count the edges and change nothing")
+    rollup = sub.add_parser("rollup", help="re-run the chain roll-up where a "
+                                           "back-link and the dates disagree")
+    rollup.add_argument("--stale-order", action="store_true", required=True)
+    rollup.add_argument("--apply", action="store_true",
+                        help="without it, count the entities and change nothing")
+    versions = sub.add_parser("versions", help="replay the newest version of every "
+                                               "notice the graph holds an older one of")
+    versions.add_argument("--apply", action="store_true",
+                          help="without it, list them and change nothing")
     return parser
 
 
@@ -396,15 +598,62 @@ def _process(repairer: Repairer, key: str, cmd: str, apply: bool) -> bool:
     return True
 
 
+def _unlink(repairer: Repairer, apply: bool) -> int:
+    if not apply:
+        print(f"{repairer.count_stray()} stray MODIFIES edges to delete")
+        return 0
+    touched = repairer.unlink_stray()
+    rebuilt = 0
+    for key in touched:
+        plan = repairer.plan(key)
+        if not plan.changes_anything:
+            continue
+        print(plan.describe())
+        if plan.missing:
+            continue
+        repairer.rebuild(plan)
+        rebuilt += 1
+    print(f"deleted the stray MODIFIES edges: {len(touched)} entities rolled up, "
+          f"{rebuilt} rebuilt")
+    return 0
+
+
+def _versions(repairer: Repairer, apply: bool) -> int:
+    behind = repairer.versions_behind()
+    for nid, _seq, payload in behind:
+        print(f"  {nid}: graph behind, newest is v{payload.get('notice_version')}")
+    if apply:
+        repairer.replay(behind)
+    print(f"{len(behind)} notices {'replayed at their newest version' if apply else 'behind'}")
+    return 0
+
+
+def _rollup(repairer: Repairer, apply: bool) -> int:
+    stale = repairer.stale_order()
+    if apply:
+        repairer.roll_up([row["nid"] for row in stale])
+    print(f"{len(stale)} entities {'rolled up' if apply else 'to roll up'}")
+    return 0
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     repairer = _connect()
     apply = getattr(args, "apply", False)
+    if args.cmd == "rollup":
+        return _rollup(repairer, apply)
+    if args.cmd == "unlink":
+        return _unlink(repairer, apply)
+    if args.cmd == "versions":
+        return _versions(repairer, apply)
 
     keys = list(getattr(args, "entity", []))
-    if args.cmd == "scan" or getattr(args, "suspects", False):
+    dual = getattr(args, "dual_homed", False)
+    if dual:
+        keys += repairer.dual_homed()
+    if (args.cmd == "scan" and not dual) or getattr(args, "suspects", False):
         keys += [s["key"] for s in repairer.suspects()]
     if not keys:
         parser.error("give --entity KEY or --suspects")

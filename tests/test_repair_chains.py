@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from neo4j_sink import repair_chains
 from neo4j_sink.repair_chains import IRI, Repairer
 from tests.test_repair_chains_plan import FakeLog
 from tests.test_contract_chain_replay import (  # noqa: F401  (fixtures)
@@ -146,7 +147,7 @@ def test_a_healthy_contract_has_nothing_to_repair(sink):
     sink.handle(_events(award, mod))
     plan = Repairer(sink, log).plan("P1")
     assert not plan.changes_anything
-    assert "nothing to repair" in plan.describe()
+    assert "nothing to rebuild" in plan.describe()
 
 
 def test_differently_keyed_notices_that_are_linked_are_one_contract(sink, neo4j):
@@ -168,3 +169,143 @@ def test_differently_keyed_notices_that_are_linked_are_one_contract(sink, neo4j)
     plan = Repairer(sink, log).plan("549184-2020")
     assert len(plan.groups) == 2 and len(plan.contracts) == 1
     assert not plan.changes_anything
+
+
+# ── stray links, stale keys, order, versions ──────────────────────
+
+
+def _stray(driver, m, t):
+    """A MODIFIES edge the retired link_ted_modifications wrote: from a
+    modification to an award its back-link does not name."""
+    with driver.session() as s:
+        s.run("MATCH (m:Notice {ted_notice_id: $m}), (t:Notice {ted_notice_id: $t}) "
+              "MERGE (m)-[:MODIFIES]->(t)", m=m, t=t)
+
+
+def test_unlink_deletes_a_stray_edge_and_keeps_the_procedure_whole(sink, neo4j):
+    """Two lots of one procedure and a modification of the first: the
+    retired linker also pointed the modification at the second lot.
+    One contract either way (one procedure, one key); only the edge goes."""
+    _, driver = neo4j
+    log = FakeLog()
+    lot2 = _award(ted_notice_id="A2", ted_publication_number="150-2026",
+                  publication_date="2026-06-01", value_eur=400.0)
+    m1 = _mod("M1", ted_publication_number="200-2026", modifies_notice_id="A",
+              publication_date="2026-03-01", value_eur=1500.0)
+    for p in (_award(), m1, lot2):
+        log.add(p)
+    sink.handle(_events(_award(), m1, lot2))
+    _stray(driver, "M1", "A2")
+    repairer = Repairer(sink, log)
+    assert repairer.count_stray() == 1
+
+    assert repairer.unlink_stray() == ["P1"]
+    state = _state(driver)
+    assert state["modifies"] == [("M1", "A")]
+    assert list(state["entities"]) == ["P1"]
+    assert not repairer.plan("P1").changes_anything
+
+
+def test_unlink_rebuilds_what_the_stray_edge_alone_held_together(sink, neo4j, capsys,
+                                                                 monkeypatch):
+    """Two procedures the old adopt folded into one entity over a stray
+    edge: without it they plan as two contracts, and `unlink` rebuilds
+    them apart."""
+    _, driver = neo4j
+    log = FakeLog()
+    other = _award(ted_notice_id="B", ted_publication_number="300-2026",
+                   contract_key="P2", procedure_id="P2", publication_date="2026-02-01",
+                   title="Road works", value_eur=50.0)
+    other_mod = _mod("MB", ted_publication_number="400-2026", contract_key="P2",
+                     procedure_id="P2", modifies_notice_id="B",
+                     publication_date="2026-04-01", value_eur=70.0)
+    for p in (_award(), other, other_mod):
+        log.add(p)
+    sink.handle(_events(_award(), other, other_mod))
+    _stray(driver, "MB", "A")
+    with driver.session() as s:
+        s.run("MATCH (e:Contract {contract_key: 'P1'}), (o:Contract {contract_key: 'P2'}) "
+              "CALL apoc.refactor.mergeNodes([e, o], {properties: 'discard', "
+              "mergeRels: true}) YIELD node RETURN node")
+    assert list(_state(driver)["entities"]) == ["P1"]
+
+    monkeypatch.setattr(repair_chains, "_connect", lambda: Repairer(sink, log))
+    assert repair_chains.main(["unlink", "--stray", "--apply"]) == 0
+    state = _state(driver)
+    assert sorted(state["entities"]) == ["P1", "P2"]
+    assert state["modifies"] == [("MB", "B")]
+    assert {n: v["entities"] for n, v in state["notices"].items()} == {
+        "A": ["P1"], "B": ["P2"], "MB": ["P2"]}
+    assert "1 rebuilt" in capsys.readouterr().out
+
+
+def test_an_entity_keyed_by_nothing_is_rebuilt_and_its_notices_go_home(sink, neo4j):
+    """grain.notice_belongs_to_one_contract: the old loader's UUID-keyed
+    entity still holds notices that also hang off their procedure's."""
+    _, driver = neo4j
+    log = FakeLog()
+    lot2 = _award(ted_notice_id="A2", ted_publication_number="150-2026",
+                  publication_date="2026-06-01", value_eur=400.0)
+    for p in (_award(), lot2):
+        log.add(p)
+    sink.handle(_events(_award(), lot2))
+    with driver.session() as s:
+        s.run("CREATE (u:Contract {contract_key: 'uuid-A', notice_count: 2}) "
+              "WITH u MATCH (n:Notice) WHERE n.ted_notice_id IN ['A', 'A2'] "
+              "MERGE (n)-[:NOTICE_OF]->(u)")
+    repairer = Repairer(sink, log)
+    assert sorted(repairer.dual_homed()) == ["P1", "uuid-A"]
+    assert not repairer.plan("P1").changes_anything
+    plan = repairer.plan("uuid-A")
+    assert plan.stale_key and plan.changes_anything
+
+    repairer.rebuild(plan)
+    state = _state(driver)
+    assert list(state["entities"]) == ["P1"]
+    assert {n: v["entities"] for n, v in state["notices"].items()} == {
+        "A": ["P1"], "A2": ["P1"]}
+    assert state["entities"]["P1"]["notice_count"] == 2
+    assert repairer.dual_homed() == []
+
+
+def test_rollup_stale_order_fixes_an_entity_rolled_up_by_dates(sink, neo4j):
+    """A same-day modification the old roll-up ranked behind its award
+    (a UUID coin flip). The sink's own roll-up, re-run, puts it first."""
+    _, driver = neo4j
+    log = FakeLog()
+    award = _award(ted_notice_id="Z", publication_date="2026-03-01")
+    mod = _mod("M", ted_publication_number="200-2026", modifies_notice_id="Z",
+               publication_date="2026-03-01", value_eur=1500.0)
+    sink.handle(_events(award, mod))
+    with driver.session() as s:     # what the date-and-id order left behind
+        s.run("MATCH (z:Notice {ted_notice_id: 'Z'}), (m:Notice {ted_notice_id: 'M'}), "
+              "(e:Contract {contract_key: 'P1'}) SET z.is_current = true, "
+              "m.is_current = false, e.ted_notice_id = 'Z', e.current_value = 1000.0")
+    repairer = Repairer(sink, log)
+    assert [r["key"] for r in repairer.stale_order()] == ["P1"]
+    repairer.roll_up([r["nid"] for r in repairer.stale_order()])
+    state = _state(driver)
+    assert state["entities"]["P1"]["latest"] == "M"
+    assert state["entities"]["P1"]["current_value"] == 1500.0
+
+
+def test_versions_replays_the_newest_version_over_an_older_one(sink, neo4j):
+    """The pre-guard state: the rescan's v01 re-emit left v01 on the node."""
+    _, driver = neo4j
+    log = FakeLog()
+    v1 = _award()
+    v2 = _award(notice_version="02", publication_date="2026-02-01", value_eur=1200.0)
+    for p in (v1, v2, v1):
+        log.add(p)
+    sink.handle(_events(v1))
+    repairer = Repairer(sink, log)
+    behind = repairer.versions_behind()
+    assert [(nid, p["notice_version"]) for nid, _seq, p in behind] == [("A", "02")]
+
+    repairer.replay(behind)
+    with driver.session() as s:
+        row = s.run("MATCH (n:Notice {ted_notice_id: 'A'})-[:NOTICE_OF]->(e:Contract) "
+                    "RETURN n.notice_version AS v, n.value_eur AS value, "
+                    "e.current_value AS current").single()
+    assert (row["v"], row["value"], row["current"]) == ("02", 1200.0, 1200.0)
+    assert not repairer.versions_behind()
