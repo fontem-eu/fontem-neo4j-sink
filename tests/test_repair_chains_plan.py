@@ -270,7 +270,8 @@ def test_an_entity_no_notice_is_keyed_by_is_rebuilt():
 
 def test_the_stray_queries_name_like_the_chain_step():
     for q in (repair_chains._STRAY_CYPHER, repair_chains._UNLINK_STRAY_CYPHER,
-              repair_chains._COUNT_STRAY_CYPHER, repair_chains._STALE_ORDER_CYPHER):
+              repair_chains._COUNT_STRAY_CYPHER, repair_chains._STALE_ORDER_CYPHER,
+              repair_chains._SUPERSEDED_CURRENT_CYPHER):
         assert ("m.modifies_notice_id = t.ted_notice_id "
                 "OR m.modifies_publication_number = t.ted_publication_number" in q)
     assert repair_chains._STRAY_CYPHER.startswith(
@@ -334,6 +335,7 @@ def _cli(monkeypatch, plans, **found):
                                          for k in found.get("stale", ())]
     repairer.unlink_stray.return_value = list(found.get("touched", ()))
     repairer.versions_behind.return_value = [("N", 9, {"notice_version": "02"})]
+    repairer.superseded_current.return_value = 0
     repairer.count_stray.return_value = 7
     repairer.plan.side_effect = lambda key: plans[key]
     repairer.rebuild.return_value = [{"key": "K", "ours": 2, "notices": 2,
@@ -421,10 +423,11 @@ def test_rollup_counts_without_apply_and_rolls_up_with_it(monkeypatch, capsys):
     repairer = _cli(monkeypatch, {}, stale=["A", "B"])
     assert repair_chains.main(["rollup", "--stale-order"]) == 0
     repairer.roll_up.assert_not_called()
-    assert "2 entities to roll up" in capsys.readouterr().out
+    assert "2 entities where a back-link and the dates disagree;" in capsys.readouterr().out
     assert repair_chains.main(["rollup", "--stale-order", "--apply"]) == 0
     repairer.roll_up.assert_called_once_with(["n-A", "n-B"])
-    assert "2 entities rolled up" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "disagree, rolled up; 0 show a superseded notice as current" in out
 
 
 def test_versions_lists_without_apply_and_replays_with_it(monkeypatch, capsys):

@@ -283,7 +283,9 @@ def test_rollup_stale_order_fixes_an_entity_rolled_up_by_dates(sink, neo4j):
               "m.is_current = false, e.ted_notice_id = 'Z', e.current_value = 1000.0")
     repairer = Repairer(sink, log)
     assert [r["key"] for r in repairer.stale_order()] == ["P1"]
+    assert repairer.superseded_current() == 1
     repairer.roll_up([r["nid"] for r in repairer.stale_order()])
+    assert repairer.superseded_current() == 0
     state = _state(driver)
     assert state["entities"]["P1"]["latest"] == "M"
     assert state["entities"]["P1"]["current_value"] == 1500.0
