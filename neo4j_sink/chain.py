@@ -125,6 +125,12 @@ CHAIN_REJECT_CYPHER = (
 #    deletes a node, and a later row of the same statement that had
 #    already resolved that node (its chain shares an entity through
 #    NOTICE_OF but not through MODIFIES) fails with "Node not found".
+#    For the same reason there is exactly ONE root entity (a graph
+#    without contract_contract_key_unique — fontem-shared, 2026-09-28 —
+#    can hold two :Contract nodes under the root's key; the second is
+#    simply folded in) and the entities to fold are collected first and
+#    merged in ONE call, so no row reads an entity an earlier row has
+#    merged away.
 CHAIN_ADOPT_CYPHER = (
     "MATCH (n:Notice { ted_notice_id: $nid }) "
     "MATCH (n)-[:MODIFIES*0..30]-(x:Notice) "
@@ -137,6 +143,7 @@ CHAIN_ADOPT_CYPHER = (
     "WITH chain, doubtful, c ORDER BY coalesce(c.publication_date, ''), c.ted_notice_id "
     "WITH chain, doubtful, head(collect(c)) AS root "
     "MATCH (root)-[:NOTICE_OF]->(e:Contract { contract_key: root.contract_key }) "
+    "WITH chain, doubtful, root, head(collect(e)) AS e "
     "UNWIND chain AS x "
     "MATCH (x)-[:NOTICE_OF]->(o:Contract) WHERE o <> e "
     "AND NOT EXISTS { (o)<-[:NOTICE_OF]-(a:Notice { notice_kind: 'award' }) "
@@ -144,10 +151,10 @@ CHAIN_ADOPT_CYPHER = (
     "OR a.modifies_notice_id IS NOT NULL OR a.modifies_publication_number IS NOT NULL "
     "OR (a.procedure_id IS NOT NULL AND root.procedure_id IS NOT NULL "
     "AND a.procedure_id <> root.procedure_id)) } "
-    "WITH DISTINCT e, o "
-    "CALL apoc.refactor.mergeNodes([e, o], "
+    "WITH e, collect(DISTINCT o) AS folded "
+    "CALL apoc.refactor.mergeNodes([e] + folded, "
     "{properties: 'discard', mergeRels: true}) YIELD node "
-    "RETURN count(node) AS merged"
+    "RETURN size(folded) AS merged"
 )
 # 3. Roll up. On each entity the chain touched: is_current on exactly
 #    the latest notice, award_ingested /
