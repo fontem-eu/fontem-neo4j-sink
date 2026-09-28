@@ -37,18 +37,31 @@ class FakeLog:
     def __exit__(self, *exc):
         return False
 
-    def execute(self, _sql, params):
+    def execute(self, sql, params=None):
+        if sql == repair_chains._MULTI_VERSION_SQL:
+            self._hit = [
+                (rows[0][1]["ted_notice_id"],) for rows in self.rows.values()
+                if len({p.get("notice_version") for _, p in rows
+                        if p.get("notice_version") is not None}) > 1]
+            return
         self._hit = self.rows.get(params[0], [])
 
     def fetchall(self):
         return list(self._hit)
 
 
-class FakeGraph:
-    """A driver whose session answers the two reads plan() makes."""
+class _Rows(list):
+    """A list of records that also answers .single(), like a Result."""
 
-    def __init__(self, notices, resolved):
-        self._notices, self._resolved = notices, resolved
+    def single(self):
+        return self[0] if self else None
+
+
+class FakeGraph:
+    """A driver whose session answers the reads plan() makes."""
+
+    def __init__(self, notices, resolved, stray=0):
+        self._notices, self._resolved, self._stray = notices, resolved, stray
         self.queries: list[str] = []
 
     def session(self):
@@ -62,14 +75,21 @@ class FakeGraph:
 
     def run(self, query, **_params):
         self.queries.append(query)
-        rows = self._notices if query == repair_chains._NOTICES_CYPHER else self._resolved
-        return [mock.Mock(data=lambda r=r: r, __getitem__=lambda _s, k, r=r: r[k])
-                for r in rows]
+        if query == repair_chains._STRAY_CYPHER:
+            rows = [{"n": self._stray}]
+        elif query == repair_chains._GRAPH_VERSIONS_CYPHER:
+            rows = self._resolved
+        elif query == repair_chains._NOTICES_CYPHER:
+            rows = self._notices
+        else:
+            rows = self._resolved
+        return _Rows(mock.Mock(data=lambda r=r: r, __getitem__=lambda _s, k, r=r: r[k])
+                     for r in rows)
 
 
-def _repairer(log, notices, resolved):
+def _repairer(log, notices, resolved, stray=0):
     sink = mock.Mock()
-    sink._driver = FakeGraph([{"nid": n} for n in notices], resolved)
+    sink._driver = FakeGraph([{"nid": n} for n in notices], resolved, stray)
     return Repairer(sink, log), sink
 
 
@@ -122,6 +142,44 @@ def test_the_newest_whole_notice_wins_over_a_later_value_patch():
     seq, payload = repairer.whole_notice("DE-M")
     assert seq == 1 and payload["title"] == DE_MOD["title"]
     assert repairer.whole_notice("never-seen") is None
+
+
+def test_the_newest_version_is_replayed_not_the_last_emit():
+    """A rescan re-emitted v01 after v02 (376 notices on prod,
+    2026-09-27): the replay takes v02, and among equal versions the
+    latest event."""
+    log = FakeLog()
+    log.add({**BG_MOD, "notice_version": "01", "title": "v1"})
+    log.add({**BG_MOD, "notice_version": "02", "title": "v2 first emit"})
+    log.add({**BG_MOD, "notice_version": "02", "title": "v2 rescored"})
+    log.add({**BG_MOD, "notice_version": "01", "title": "v1 rescanned"})
+    repairer, _ = _repairer(log, [], [])
+    seq, payload = repairer.whole_notice("BG-M")
+    assert (seq, payload["title"]) == (3, "v2 rescored")
+
+
+def test_a_versioned_emit_outranks_an_unversioned_one():
+    log = FakeLog()
+    log.add({**BG_MOD, "notice_version": "01", "title": "versioned"})
+    log.add({**BG_MOD, "title": "pre-single-path emit, no version"})
+    repairer, _ = _repairer(log, [], [])
+    assert repairer.whole_notice("BG-M")[1]["title"] == "versioned"
+
+
+def test_versions_behind_are_the_notices_the_graph_holds_older():
+    log = FakeLog()
+    for nid, versions in (("BEHIND", ("01", "02", "01")), ("CURRENT", ("01", "02")),
+                          ("ONE", ("01",)), ("GONE", ("01", "02"))):
+        for v in versions:
+            log.add({**BG_MOD, "ted_notice_id": nid, "notice_version": v})
+    graph = [{"nid": "BEHIND", "v": "01"}, {"nid": "CURRENT", "v": "02"}]
+    repairer, sink = _repairer(log, [], graph)
+    behind = repairer.versions_behind()
+    assert [(nid, p["notice_version"]) for nid, _seq, p in behind] == [("BEHIND", "02")]
+    repairer.replay(behind)
+    (events,), _ = sink.handle.call_args
+    assert [(e.iri, e.payload["notice_version"], e.producer) for e in events] == [
+        (IRI.format("BEHIND"), "02", "repair_chains")]
 
 
 def test_a_pre_native_notice_is_keyed_the_way_the_ingest_path_keys_it_today():
@@ -177,7 +235,47 @@ def test_a_refused_link_the_graph_no_longer_acts_on_needs_no_repair():
     plan = repairer.plan("BGPROC")
     assert len(plan.refused) == 1 and not plan.changes_anything
     assert "(already unlinked)" in plan.describe()
-    assert "nothing to repair" in plan.describe()
+    assert "nothing to rebuild" in plan.describe()
+
+
+def test_a_stray_link_alone_is_not_a_reason_to_rebuild():
+    """One contract under its own key, every back-link fine, but a
+    MODIFIES edge the retired linker wrote: `unlink` deletes the edge,
+    no notice moves."""
+    log = FakeLog()
+    log.add(DE_AWARD)
+    log.add(DE_MOD)
+    repairer, _ = _repairer(log, ["DE-A", "DE-M"], [
+        {"m": "DE-M", "target": "DE-A", "linked": True}], stray=2)
+    plan = repairer.plan("375716-2020")
+    assert len(plan.contracts) == 1 and not plan.refused and not plan.stale_key
+    assert plan.stray == 2 and not plan.changes_anything
+    assert "2 MODIFIES edge(s) no back-link names" in plan.describe()
+
+
+def test_an_entity_no_notice_is_keyed_by_is_rebuilt():
+    """The old split: an eForms award keyed by its own UUID, re-stamped
+    with its procedure id. Nothing on the entity claims the UUID key."""
+    log = FakeLog()
+    log.add({**BG_MOD, "ted_notice_id": "BG-A", "notice_type": "can-standard",
+             "modifies_publication_number": None})
+    log.add(BG_MOD)
+    repairer, _ = _repairer(log, ["BG-A", "BG-M"], [])
+    plan = repairer.plan("uuid-of-BG-A")
+    assert plan.groups == {"BGPROC": ["BG-A", "BG-M"]}
+    assert plan.stale_key and plan.changes_anything
+    assert "no notice is keyed uuid-of-BG-A" in plan.describe()
+    assert not repairer.plan("BGPROC").stale_key
+
+
+def test_the_stray_queries_name_like_the_chain_step():
+    for q in (repair_chains._STRAY_CYPHER, repair_chains._UNLINK_STRAY_CYPHER,
+              repair_chains._COUNT_STRAY_CYPHER, repair_chains._STALE_ORDER_CYPHER):
+        assert ("m.modifies_notice_id = t.ted_notice_id "
+                "OR m.modifies_publication_number = t.ted_publication_number" in q)
+    assert repair_chains._STRAY_CYPHER.startswith(
+        "UNWIND $nids AS nid MATCH (:Notice { ted_notice_id: nid })")
+    assert "LIMIT $limit" in repair_chains._UNLINK_STRAY_CYPHER
 
 
 def test_a_legacy_modification_with_a_refused_back_link_is_rekeyed():
@@ -226,9 +324,17 @@ def test_empty_plan_has_no_contracts():
 # ── command line ──────────────────────────────────────────────────
 
 
-def _cli(monkeypatch, plans, suspects=()):
+def _cli(monkeypatch, plans, **found):
+    """found: the entity keys each finder returns (suspects, dual,
+    stale, touched)."""
     repairer = mock.Mock()
-    repairer.suspects.return_value = [{"key": k} for k in suspects]
+    repairer.suspects.return_value = [{"key": k} for k in found.get("suspects", ())]
+    repairer.dual_homed.return_value = list(found.get("dual", ()))
+    repairer.stale_order.return_value = [{"key": k, "nid": f"n-{k}"}
+                                         for k in found.get("stale", ())]
+    repairer.unlink_stray.return_value = list(found.get("touched", ()))
+    repairer.versions_behind.return_value = [("N", 9, {"notice_version": "02"})]
+    repairer.count_stray.return_value = 7
     repairer.plan.side_effect = lambda key: plans[key]
     repairer.rebuild.return_value = [{"key": "K", "ours": 2, "notices": 2,
                                       "award": True, "value": 1.0, "buyers": ["B"]}]
@@ -251,7 +357,7 @@ def test_rebuild_without_apply_changes_nothing(monkeypatch, capsys):
 
 
 def test_rebuild_apply_rebuilds_only_what_is_broken(monkeypatch, capsys):
-    healthy = Plan("H", payloads={"a": {"contract_key": "1", "ted_notice_id": "a"}})
+    healthy = Plan("H", payloads={"a": {"contract_key": "H", "ted_notice_id": "a"}})
     repairer = _cli(monkeypatch, {"K": _broken(), "H": healthy}, suspects=["K", "H"])
     assert repair_chains.main(["rebuild", "--suspects", "--apply"]) == 0
     assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["K"]
@@ -259,7 +365,7 @@ def test_rebuild_apply_rebuilds_only_what_is_broken(monkeypatch, capsys):
 
 
 def test_scan_lists_only_entities_that_need_repair(monkeypatch, capsys):
-    healthy = Plan("H", payloads={"a": {"contract_key": "1", "ted_notice_id": "a"}})
+    healthy = Plan("H", payloads={"a": {"contract_key": "H", "ted_notice_id": "a"}})
     _cli(monkeypatch, {"K": _broken(), "H": healthy}, suspects=["K", "H"])
     assert repair_chains.main(["scan"]) == 0
     out = capsys.readouterr().out
@@ -271,3 +377,61 @@ def test_plan_needs_a_target(monkeypatch):
     _cli(monkeypatch, {})
     with pytest.raises(SystemExit):
         repair_chains.main(["plan"])
+
+
+def test_dual_homed_rebuilds_only_the_entities_that_need_it(monkeypatch, capsys):
+    healthy = Plan("H", payloads={"a": {"contract_key": "H", "ted_notice_id": "a"}})
+    repairer = _cli(monkeypatch, {"K": _broken(), "H": healthy},
+                    suspects=["X"], dual=["K", "H"])
+    assert repair_chains.main(["rebuild", "--dual-homed", "--apply"]) == 0
+    repairer.suspects.assert_not_called()          # the country suspects stay out
+    assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["K"]
+    assert "now K: 2 of these notices" in capsys.readouterr().out
+
+
+def test_scan_dual_homed_replaces_the_country_suspects(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {"K": _broken()}, suspects=["X"], dual=["K"])
+    assert repair_chains.main(["scan", "--dual-homed"]) == 0
+    repairer.suspects.assert_not_called()
+    assert "1 of 1 entities need repair" in capsys.readouterr().out
+
+
+def test_unlink_counts_without_apply(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {})
+    assert repair_chains.main(["unlink", "--stray"]) == 0
+    repairer.unlink_stray.assert_not_called()
+    assert "7 stray MODIFIES edges to delete" in capsys.readouterr().out
+
+
+def test_unlink_rebuilds_only_what_the_edges_alone_held_together(monkeypatch, capsys):
+    whole = Plan("H", payloads={"a": {"contract_key": "H", "ted_notice_id": "a"}})
+    unreplayable = Plan("M", payloads={"a": {"contract_key": "1", "ted_notice_id": "a"},
+                                       "b": {"contract_key": "2", "ted_notice_id": "b"}},
+                        missing=["c"])
+    repairer = _cli(monkeypatch, {"K": _broken(), "H": whole, "M": unreplayable},
+                    touched=["H", "K", "M"])
+    assert repair_chains.main(["unlink", "--stray", "--apply"]) == 1   # M is stuck
+    assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["K"]
+    out = capsys.readouterr().out
+    assert "entity K" in out and "NOT REBUILDABLE" in out and "entity H" not in out
+    assert "3 entities rolled up, 1 rebuilt, 1 left" in out
+
+
+def test_rollup_counts_without_apply_and_rolls_up_with_it(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {}, stale=["A", "B"])
+    assert repair_chains.main(["rollup", "--stale-order"]) == 0
+    repairer.roll_up.assert_not_called()
+    assert "2 entities to roll up" in capsys.readouterr().out
+    assert repair_chains.main(["rollup", "--stale-order", "--apply"]) == 0
+    repairer.roll_up.assert_called_once_with(["n-A", "n-B"])
+    assert "2 entities rolled up" in capsys.readouterr().out
+
+
+def test_versions_lists_without_apply_and_replays_with_it(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {})
+    assert repair_chains.main(["versions"]) == 0
+    repairer.replay.assert_not_called()
+    assert "N: graph behind, newest is v02" in capsys.readouterr().out
+    assert repair_chains.main(["versions", "--apply"]) == 0
+    repairer.replay.assert_called_once_with([("N", 9, {"notice_version": "02"})])
+    assert "1 notices replayed at their newest version" in capsys.readouterr().out
