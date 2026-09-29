@@ -14,7 +14,7 @@ COPY vendor/*.whl /tmp/wheels/
 RUN pip install --no-cache-dir /tmp/wheels/*.whl .
 
 # ── runtime: distroless; neo4j_sink installed into the venv ───────────────────
-FROM cgr.void42.internal/chainguard/python:latest@sha256:be59f7abb600892c78e6ff0fe1a8f39549da13302dc003c8a5eb1c14b03d995c
+FROM cgr.void42.internal/chainguard/python:latest@sha256:a1775c7276078865461ee5714954284f12809f333433d856d720b249c65c11b2
 WORKDIR /app
 COPY --from=build /venv /venv
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
