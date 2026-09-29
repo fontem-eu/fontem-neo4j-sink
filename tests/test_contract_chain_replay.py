@@ -442,6 +442,58 @@ def test_two_entities_under_the_root_key_fold_into_one(sink, neo4j):
                   "FOR (c:Contract) REQUIRE c.contract_key IS UNIQUE")
 
 
+# ── the contract's history and its display fields ─────────────────
+
+
+def _entity(driver, key):
+    with driver.session() as s:
+        return s.run("MATCH (e:Contract {contract_key: $k}) RETURN e.history_notice_ids AS ids, "
+                     "e.history_kinds AS kinds, e.history_dates AS dates, "
+                     "e.history_versions AS versions, e.publication_date AS pub, "
+                     "e.canonical_publication_date AS canon, e.value_quality_flag AS flag, "
+                     "e.value_eur AS value, e.ted_notice_id AS latest", k=key).single().data()
+
+
+def test_the_contract_carries_its_history_oldest_first(sink, neo4j):
+    """Every notice, in the order the roll-up decides, the current one
+    last — whatever order the notices arrived in."""
+    _, driver = neo4j
+    for order in ((_award(), M1, M2), (M2, _award(), M1)):
+        with driver.session() as s:
+            s.run("MATCH (n) DETACH DELETE n")
+        sink.handle(_events(*order))
+        e = _entity(driver, "P1")
+        assert e["ids"] == ["A", "M1", "M2"]
+        assert e["kinds"] == ["award", "modification", "modification"]
+        assert e["dates"] == ["2026-01-10", "2026-03-01", "2026-05-01"]
+        assert e["versions"] == ["01", "01", "01"]
+        assert (e["latest"], e["pub"], e["canon"]) == ("M2", "2026-05-01", "2026-05-01")
+
+
+def test_a_corrected_earlier_date_reaches_the_contract(sink, neo4j):
+    """The FieldsPrivacy repair: the notice was dated 2034, the re-emit
+    says 2024. The guarded display write cannot lower the date; the
+    roll-up takes it from the canonical notice."""
+    _, driver = neo4j
+    sink.handle(_events(_award(publication_date="2034-01-10")))
+    assert _entity(driver, "P1")["pub"] == "2034-01-10"
+    sink.handle(_events(_award(), start=2))
+    e = _entity(driver, "P1")
+    assert (e["pub"], e["canon"], e["dates"]) == ("2026-01-10", "2026-01-10", ["2026-01-10"])
+
+
+def test_the_value_verdict_comes_with_the_value(sink, neo4j):
+    """A merge that kept an older notice's flag next to a newer notice's
+    value: the roll-up takes flag and value from the same notice."""
+    _, driver = neo4j
+    sink.handle(_events(_award(), M1))
+    with driver.session() as s:
+        s.run("MATCH (e:Contract {contract_key: 'P1'}) SET e.value_quality_flag = 'zero_value'")
+    sink.handle(_events(M1, start=3))
+    e = _entity(driver, "P1")
+    assert (e["value"], e["flag"]) == (1500.0, None)
+
+
 # ── a back-link is judged before it may link ──────────────────────
 
 

@@ -157,7 +157,9 @@ CHAIN_ADOPT_CYPHER = (
     "RETURN size(folded) AS merged"
 )
 # 3. Roll up. On each entity the chain touched: is_current on exactly
-#    the latest notice, award_ingested /
+#    the latest notice, the contract's history (every notice in order),
+#    the display date and the value with its flag and confidence taken
+#    from the canonical notices, award_ingested /
 #    notice_kind from whether an award is in the chain, notice_count
 #    from the chain, current_value = the latest restated value
 #    (the newest notice whose value was not withheld), and every
@@ -211,9 +213,19 @@ CHAIN_ROLLUP_CYPHER = (
     "e.value_eur = CASE WHEN quarantined THEN null "
     "  WHEN size(valued) > 0 THEN valued[0].value_eur END, "
     "e.value_original = CASE WHEN quarantined THEN null "
-    "  ELSE e.value_original END, "
+    "  WHEN size(valued) > 0 THEN valued[0].value_original ELSE e.value_original END, "
     "e.value_currency = CASE WHEN quarantined THEN null "
-    "  ELSE e.value_currency END, "
+    "  WHEN size(valued) > 0 THEN valued[0].value_currency ELSE e.value_currency END, "
+    # The value's own verdict travels with the value: the flag and the
+    # confidence of the notice the value comes from (the latest when it
+    # is quarantined). The entity used to keep whatever the root award's
+    # entity carried when an adopt merge kept its properties — 12
+    # hard-flag failures on 2026-09-29 were an older notice's flag next
+    # to a newer notice's healthy value.
+    "e.value_quality_flag = CASE WHEN quarantined OR size(valued) = 0 "
+    "  THEN latest.value_quality_flag ELSE valued[0].value_quality_flag END, "
+    "e.value_confidence = CASE WHEN quarantined OR size(valued) = 0 "
+    "  THEN latest.value_confidence ELSE valued[0].value_confidence END, "
     # The marker follows the canonical notice for the same reason the
     # value does. The mirror of the bug above: an entity kept a
     # quarantine marker an OLDER notice left behind while a newer,
@@ -225,7 +237,22 @@ CHAIN_ROLLUP_CYPHER = (
     "e.value_quarantine_reason = CASE WHEN quarantined "
     "  THEN latest.value_quarantine_reason ELSE null END, "
     "e.ted_notice_id = latest.ted_notice_id, "
-    "e.canonical_publication_date = latest.publication_date "
+    "e.canonical_publication_date = latest.publication_date, "
+    # The display date is the canonical notice's. It used to be set only
+    # by the high-water-guarded entity write, which can never lower it: a
+    # date corrected downwards (the FieldsPrivacy repair, 4,767 contracts
+    # dated 2027+ on 2026-09-29) or a merge that kept the root award's
+    # older date (15,694) stuck.
+    "e.publication_date = coalesce(latest.publication_date, e.publication_date), "
+    # The contract's history: every notice, oldest first, the current one
+    # last, in the order this roll-up decides (chain first, then dates).
+    # Parallel arrays (a property cannot hold a list of maps), aligned by
+    # index; the :Notice nodes remain the record, this is their summary,
+    # rebuilt whole by every roll-up.
+    "e.history_notice_ids = [x IN reverse(ordered) | x.ted_notice_id], "
+    "e.history_kinds = [x IN reverse(ordered) | coalesce(x.notice_kind, '')], "
+    "e.history_dates = [x IN reverse(ordered) | coalesce(x.publication_date, '')], "
+    "e.history_versions = [x IN reverse(ordered) | coalesce(x.notice_version, '')] "
     "FOREACH (x IN ordered | SET x.is_current = (x = latest), "
     "x.contract_key = e.contract_key)"
 )
