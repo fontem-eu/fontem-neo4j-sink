@@ -503,6 +503,31 @@ def test_the_whole_value_verdict_comes_from_one_notice(sink, neo4j):
     assert (e["c"], e["k"], e["p"], e["low"]) == (0.24, 0.4, 0.6, True)
 
 
+def test_a_notice_on_two_contracts_counts_for_one(sink, neo4j):
+    """A notice the adopt step cannot merge away hangs off two contracts;
+    it is the current notice (and the value) of only one of them: the
+    contract under its own key. Before, both took it and aggregates
+    counted its value twice."""
+    _, driver = neo4j
+    other = _award(ted_notice_id="B", ted_publication_number="300-2026",
+                   contract_key="P2", procedure_id="P2", publication_date="2026-02-01",
+                   value_eur=50.0)
+    sink.handle(_events(_award(), M1, other))
+    with driver.session() as s:     # M1 (procedure P1) also hangs off P2
+        s.run("MATCH (m:Notice {ted_notice_id: 'M1'}), (e:Contract {contract_key: 'P2'}) "
+              "MERGE (m)-[:NOTICE_OF]->(e)")
+        s.run(chain_mod.CHAIN_ROLLUP_CYPHER, rows=[{"nid": "M1"}])
+        rows = s.run("MATCH (e:Contract) RETURN e.contract_key AS k, e.ted_notice_id AS latest, "
+                     "e.current_value AS v, e.history_notice_ids AS ids ORDER BY k").data()
+        current = s.run("MATCH (m:Notice {ted_notice_id: 'M1'}) RETURN m.is_current AS c, "
+                        "m.contract_key AS k").single().data()
+    assert rows == [
+        {"k": "P1", "latest": "M1", "v": 1500.0, "ids": ["A", "M1"]},
+        {"k": "P2", "latest": "B", "v": 50.0, "ids": ["B"]},
+    ]
+    assert current == {"c": True, "k": "P1"}
+
+
 def test_the_value_verdict_comes_with_the_value(sink, neo4j):
     """A merge that kept an older notice's flag next to a newer notice's
     value: the roll-up takes flag and value from the same notice."""

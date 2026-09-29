@@ -184,6 +184,17 @@ CHAIN_ROLLUP_CYPHER = (
     "MATCH (:Notice { ted_notice_id: row.nid })-[:NOTICE_OF]->(e:Contract) "
     "WITH DISTINCT e "
     "MATCH (e)<-[:NOTICE_OF]-(x:Notice) "
+    # A notice that hangs off two contracts (a source contradiction the
+    # adopt step will not merge away; known_exceptions in the DQ catalog)
+    # counts for exactly ONE of them: the contract under the notice's own
+    # key, else the smallest key. Counted by both, it was the current
+    # notice of both and its value was summed twice — 9 notices, about
+    # EUR 100M, on 2026-09-29. The other contract keeps the edge but not
+    # the notice's value, date, current flag or place in its history.
+    "WITH e, x, [(x)-[:NOTICE_OF]->(h:Contract) | h.contract_key] AS homes, "
+    "coalesce(x.procedure_id, x.ted_publication_number, x.ted_notice_id) AS own "
+    "WHERE size(homes) = 1 OR e.contract_key = CASE WHEN own IN homes THEN own "
+    "ELSE apoc.coll.min(homes) END "
     "WITH e, x, EXISTS { (y:Notice)-[:MODIFIES]->(x) "
     "WHERE (y)-[:NOTICE_OF]->(e) AND (y.modifies_notice_id = x.ted_notice_id "
     "OR y.modifies_publication_number = x.ted_publication_number) } AS superseded "
