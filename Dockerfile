@@ -12,6 +12,10 @@ COPY pyproject.toml .
 COPY neo4j_sink/ ./neo4j_sink/
 COPY vendor/*.whl /tmp/wheels/
 RUN pip install --no-cache-dir /tmp/wheels/*.whl .
+# The runtime needs the packages in the venv, not the tool that installed
+# them: pip in a runtime image fetches and installs code (docker-build-sign
+# checks runtime images for it).
+RUN pip uninstall -y pip
 
 # ── runtime: distroless; neo4j_sink installed into the venv ───────────────────
 FROM cgr.void42.internal/chainguard/python:latest@sha256:a1775c7276078865461ee5714954284f12809f333433d856d720b249c65c11b2
