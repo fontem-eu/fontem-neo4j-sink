@@ -204,6 +204,10 @@ CHAIN_ROLLUP_CYPHER = (
     # older notice that still had a number.
     "WITH e, ordered, latest, valued, has_award, "
     "coalesce(latest.value_quarantined, false) AS quarantined "
+    # The notice whose value the entity shows; its whole verdict comes
+    # with it (see below).
+    "WITH e, ordered, latest, valued, has_award, quarantined, "
+    "CASE WHEN quarantined OR size(valued) = 0 THEN latest ELSE valued[0] END AS src "
     "SET e.award_ingested = has_award, "
     "e.notice_kind = CASE WHEN has_award THEN 'award' ELSE 'modification' END, "
     "e.notice_count = size(ordered), "
@@ -216,16 +220,24 @@ CHAIN_ROLLUP_CYPHER = (
     "  WHEN size(valued) > 0 THEN valued[0].value_original ELSE e.value_original END, "
     "e.value_currency = CASE WHEN quarantined THEN null "
     "  WHEN size(valued) > 0 THEN valued[0].value_currency ELSE e.value_currency END, "
-    # The value's own verdict travels with the value: the flag and the
-    # confidence of the notice the value comes from (the latest when it
-    # is quarantined). The entity used to keep whatever the root award's
+    # The value's whole verdict travels with the value, as one group from
+    # one notice (`src`: the notice the value comes from, the latest when
+    # it is quarantined). The entity used to keep whatever the root award's
     # entity carried when an adopt merge kept its properties — 12
-    # hard-flag failures on 2026-09-29 were an older notice's flag next
-    # to a newer notice's healthy value.
-    "e.value_quality_flag = CASE WHEN quarantined OR size(valued) = 0 "
-    "  THEN latest.value_quality_flag ELSE valued[0].value_quality_flag END, "
-    "e.value_confidence = CASE WHEN quarantined OR size(valued) = 0 "
-    "  THEN latest.value_confidence ELSE valued[0].value_confidence END, "
+    # hard-flag failures on 2026-09-29 were an older notice's flag next to
+    # a newer notice's value. Moving only the flag and the confidence
+    # broke the confidence's own formula on 15,004 contracts (its
+    # consistency and plausibility factors stayed behind), so every field
+    # of the group moves together.
+    "e.value_quality_flag = src.value_quality_flag, "
+    "e.value_confidence = src.value_confidence, "
+    "e.value_confidence_consistency = src.value_confidence_consistency, "
+    "e.value_confidence_plausibility = src.value_confidence_plausibility, "
+    "e.value_low_confidence = src.value_low_confidence, "
+    "e.value_payable_eur = src.value_payable_eur, "
+    "e.value_payable_discrepancy = src.value_payable_discrepancy, "
+    "e.value_before_eur = src.value_before_eur, "
+    "e.value_before_original = src.value_before_original, "
     # The marker follows the canonical notice for the same reason the
     # value does. The mirror of the bug above: an entity kept a
     # quarantine marker an OLDER notice left behind while a newer,
