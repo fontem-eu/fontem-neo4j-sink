@@ -7,6 +7,7 @@
     python -m neo4j_sink.repair_chains rebuild --dual-homed --apply
     python -m neo4j_sink.repair_chains unlink  --stray --apply
     python -m neo4j_sink.repair_chains rollup  --stale-order --apply
+    python -m neo4j_sink.repair_chains rollup  --all --apply
     python -m neo4j_sink.repair_chains versions --apply
     python -m neo4j_sink.repair_chains readopt --dual-homed --apply
     python -m neo4j_sink.repair_chains rebuild --duplicate-keys --apply
@@ -63,7 +64,10 @@ ORDER. The roll-up orders a contract by its chain before its dates
 (chain.py). An entity rolled up before that rule, and not written
 since, still shows the old "latest"; `rollup --stale-order` re-runs
 the sink's own roll-up on every entity where a back-link and the
-dates disagree.
+dates disagree. `rollup --all` re-runs it on every contract, a page at
+a time in contract_key order: what a new roll-up rule (the contract
+history, the display date and value verdict from the canonical
+notice) needs to reach contracts no new notice will touch.
 
 DUPLICATE KEYS. A graph without contract_contract_key_unique can hold
 one contract_key on two :Contract nodes (fontem-shared, 2026-09-28: 12
@@ -208,6 +212,20 @@ _SUPERSEDED_CURRENT_CYPHER = (
     f"WHERE {_NAMED} "
     "MATCH (m)-[:NOTICE_OF]->(e:Contract)<-[:NOTICE_OF]-(t) "
     "RETURN count(DISTINCT e) AS n"
+)
+# One page of contracts in key order (the unique constraint's index
+# serves both the range and the order), with one notice each to name
+# the entity to the roll-up.
+_ALL_PAGE_CYPHER = (
+    "MATCH (e:Contract) WHERE e.contract_key > $after "
+    "WITH e ORDER BY e.contract_key LIMIT $limit "
+    "OPTIONAL MATCH (e)<-[:NOTICE_OF]-(n:Notice) "
+    "WITH e, head(collect(n.ted_notice_id)) AS nid "
+    "RETURN e.contract_key AS key, nid ORDER BY key"
+)
+_DISPLAY_STALE_CYPHER = (
+    "MATCH (c:Contract) WHERE c.publication_date <> c.canonical_publication_date "
+    "RETURN count(c) AS n"
 )
 _NOTICES_CYPHER = (
     "MATCH (n:Notice)-[:NOTICE_OF]->(:Contract { contract_key: $key }) "
@@ -514,6 +532,26 @@ class Repairer:
                 for nid, seq, payload in notices[i:i + _REPLAY_BATCH]
             ])
 
+    def rollup_all(self, page: int = 2000, report=print) -> int:
+        """The roll-up on every contract with a notice. Returns how many."""
+        after, done, pages = "", 0, 0
+        while True:
+            with self._driver.session() as s:
+                rows = s.run(_ALL_PAGE_CYPHER, after=after, limit=page).data()
+            if not rows:
+                return done
+            after = rows[-1]["key"]
+            nids = [r["nid"] for r in rows if r["nid"]]
+            self.roll_up(nids)
+            done += len(nids)
+            pages += 1
+            if pages % 50 == 0:
+                report(f"  {done} contracts rolled up (at {after})")
+
+    def display_stale(self) -> int:
+        with self._driver.session() as s:
+            return s.run(_DISPLAY_STALE_CYPHER).single()["n"]
+
     def superseded_current(self) -> int:
         with self._driver.session() as s:
             return s.run(_SUPERSEDED_CURRENT_CYPHER).single()["n"]
@@ -633,8 +671,11 @@ def _parser() -> argparse.ArgumentParser:
     unlink.add_argument("--apply", action="store_true",
                         help="without it, count the edges and change nothing")
     rollup = sub.add_parser("rollup", help="re-run the chain roll-up where a "
-                                           "back-link and the dates disagree")
-    rollup.add_argument("--stale-order", action="store_true", required=True)
+                                           "back-link and the dates disagree, "
+                                           "or on every contract")
+    which = rollup.add_mutually_exclusive_group(required=True)
+    which.add_argument("--stale-order", action="store_true")
+    which.add_argument("--all", action="store_true", dest="all_contracts")
     rollup.add_argument("--apply", action="store_true",
                         help="without it, count the entities and change nothing")
     readopt = sub.add_parser("readopt", help="re-run the adopt step on every "
@@ -706,6 +747,16 @@ def _versions(repairer: Repairer, apply: bool) -> int:
     return 0
 
 
+def _rollup_all(repairer: Repairer, apply: bool) -> int:
+    print(f"{repairer.display_stale()} contracts whose display date is not "
+          f"their canonical notice's")
+    if apply:
+        done = repairer.rollup_all()
+        print(f"{done} contracts rolled up; {repairer.display_stale()} still "
+              f"show another date than their canonical notice's")
+    return 0
+
+
 def _rollup(repairer: Repairer, apply: bool) -> int:
     stale = repairer.stale_order()
     if apply:
@@ -723,6 +774,8 @@ def main(argv: "list[str] | None" = None) -> int:
     repairer = _connect()
     apply = getattr(args, "apply", False)
     if args.cmd == "rollup":
+        if args.all_contracts:
+            return _rollup_all(repairer, apply)
         return _rollup(repairer, apply)
     if args.cmd == "unlink":
         return _unlink(repairer, apply)

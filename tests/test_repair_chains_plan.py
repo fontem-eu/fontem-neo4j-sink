@@ -339,6 +339,8 @@ def _cli(monkeypatch, plans, **found):
     repairer.unlink_stray.return_value = list(found.get("touched", ()))
     repairer.versions_behind.return_value = [("N", 9, {"notice_version": "02"})]
     repairer.superseded_current.return_value = 0
+    repairer.display_stale.side_effect = [20612, 0]
+    repairer.rollup_all.return_value = 4_660_000
     repairer.dual_homed_notices.side_effect = [["x", "y"], []]
     repairer.count_stray.return_value = 7
     repairer.plan.side_effect = lambda key: plans[key]
@@ -460,3 +462,12 @@ def test_duplicate_keys_rebuild_the_keys_held_twice(monkeypatch, capsys):
     assert repair_chains.main(["rebuild", "--duplicate-keys", "--apply"]) == 0
     assert [c.args[0].key for c in repairer.rebuild.call_args_list] == ["T"]
     capsys.readouterr()
+
+
+def test_rollup_all_reports_the_stale_display_dates_before_and_after(monkeypatch, capsys):
+    repairer = _cli(monkeypatch, {})
+    assert repair_chains.main(["rollup", "--all", "--apply"]) == 0
+    repairer.rollup_all.assert_called_once_with()
+    out = capsys.readouterr().out
+    assert "20612 contracts whose display date" in out
+    assert "4660000 contracts rolled up; 0 still" in out

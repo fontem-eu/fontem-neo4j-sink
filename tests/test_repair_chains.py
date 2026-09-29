@@ -14,7 +14,7 @@ from neo4j_sink import repair_chains
 from neo4j_sink.repair_chains import IRI, Repairer
 from tests.test_repair_chains_plan import FakeLog
 from tests.test_contract_chain_replay import (  # noqa: F401  (fixtures)
-    _assert_two_separate_contracts, _award, _bulgarian_award, _framework,
+    M1, _assert_two_separate_contracts, _award, _bulgarian_award, _framework,
     _bulgarian_mod_with_the_typo, _events, _german_award, _german_mod, _mod,
     _state, neo4j, pytestmark, sink,
 )
@@ -368,3 +368,21 @@ def test_a_key_held_by_two_nodes_is_rebuilt_as_one(sink, neo4j):
             s.run("MATCH (n) DETACH DELETE n")
             s.run("CREATE CONSTRAINT contract_contract_key_unique IF NOT EXISTS "
                   "FOR (c:Contract) REQUIRE c.contract_key IS UNIQUE")
+
+
+def test_rollup_all_rederives_every_contract(sink, neo4j):
+    """A contract no new notice will touch: stale display date, no
+    history. rollup --all brings it level with what the roll-up derives."""
+    _, driver = neo4j
+    sink.handle(_events(_award(), M1))
+    with driver.session() as s:
+        s.run("MATCH (e:Contract {contract_key: 'P1'}) SET e.publication_date = '2034-01-10' "
+              "REMOVE e.history_notice_ids")
+    repairer = Repairer(sink, FakeLog())
+    assert repairer.display_stale() == 1
+    assert repairer.rollup_all(page=1, report=lambda _msg: None) == 1
+    assert repairer.display_stale() == 0
+    with driver.session() as s:
+        ids = s.run("MATCH (e:Contract {contract_key: 'P1'}) "
+                    "RETURN e.history_notice_ids AS ids").single()["ids"]
+    assert ids == ["A", "M1"]
