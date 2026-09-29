@@ -24,6 +24,7 @@ from unittest import mock
 
 import pytest
 
+from neo4j_sink import chain as chain_mod
 from tests.test_bracket_loss_repro import _ev
 
 testcontainers_neo4j = pytest.importorskip("testcontainers.neo4j")
@@ -484,14 +485,18 @@ def test_a_corrected_earlier_date_reaches_the_contract(sink, neo4j):
 
 def test_the_whole_value_verdict_comes_from_one_notice(sink, neo4j):
     """values.confidence_formula: the confidence and the two factors it
-    is the product of must come from the same notice."""
+    is the product of must come from the same notice. The prod case is a
+    roll-up on its own (rollup --all) over an entity whose properties an
+    adopt merge kept from the root award."""
     _, driver = neo4j
-    award = _award(value_confidence=0.9, value_confidence_consistency=0.9,
-                   value_confidence_plausibility=1.0)
     mod = dict(M1, value_confidence=0.24, value_confidence_consistency=0.4,
                value_confidence_plausibility=0.6, value_low_confidence=True)
-    sink.handle(_events(award, mod))
-    with driver.session() as s:
+    sink.handle(_events(_award(), mod))
+    with driver.session() as s:     # what the merge left: the root award's verdict
+        s.run("MATCH (e:Contract {contract_key: 'P1'}) SET e.value_confidence = 0.9, "
+              "e.value_confidence_consistency = 0.9, e.value_confidence_plausibility = 1.0, "
+              "e.value_low_confidence = false")
+        s.run(chain_mod.CHAIN_ROLLUP_CYPHER, rows=[{"nid": "M1"}])
         e = s.run("MATCH (e:Contract {contract_key: 'P1'}) RETURN e.value_confidence AS c, "
                   "e.value_confidence_consistency AS k, e.value_confidence_plausibility AS p, "
                   "e.value_low_confidence AS low").single().data()
