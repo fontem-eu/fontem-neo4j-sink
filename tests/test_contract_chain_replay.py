@@ -482,6 +482,22 @@ def test_a_corrected_earlier_date_reaches_the_contract(sink, neo4j):
     assert (e["pub"], e["canon"], e["dates"]) == ("2026-01-10", "2026-01-10", ["2026-01-10"])
 
 
+def test_the_whole_value_verdict_comes_from_one_notice(sink, neo4j):
+    """values.confidence_formula: the confidence and the two factors it
+    is the product of must come from the same notice."""
+    _, driver = neo4j
+    award = _award(value_confidence=0.9, value_confidence_consistency=0.9,
+                   value_confidence_plausibility=1.0)
+    mod = dict(M1, value_confidence=0.24, value_confidence_consistency=0.4,
+               value_confidence_plausibility=0.6, value_low_confidence=True)
+    sink.handle(_events(award, mod))
+    with driver.session() as s:
+        e = s.run("MATCH (e:Contract {contract_key: 'P1'}) RETURN e.value_confidence AS c, "
+                  "e.value_confidence_consistency AS k, e.value_confidence_plausibility AS p, "
+                  "e.value_low_confidence AS low").single().data()
+    assert (e["c"], e["k"], e["p"], e["low"]) == (0.24, 0.4, 0.6, True)
+
+
 def test_the_value_verdict_comes_with_the_value(sink, neo4j):
     """A merge that kept an older notice's flag next to a newer notice's
     value: the roll-up takes flag and value from the same notice."""
