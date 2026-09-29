@@ -32,6 +32,7 @@ from neo4j_sink.identity import (
 # Re-exported: CypherWrite lived here until identity.py needed it
 # too, and every caller and test imports it from this module.
 from neo4j_sink.chain import render_contract_chain
+from neo4j_sink import translations as title_translations
 from neo4j_sink.writes import CypherWrite
 
 
@@ -957,6 +958,8 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
     "TranslateAuthorityName": render_translate_authority_name,
+    "TranslateContractTitle": title_translations.render_translate_contract_title,
+    "TranslateDisclosureTitle": title_translations.render_translate_disclosure_title,
     "UpsertContract": render_upsert_contract,
     "UpsertFrameworkAgreement": render_upsert_framework_agreement,
     "UpsertTaxonomyCode": render_upsert_taxonomy_code,
