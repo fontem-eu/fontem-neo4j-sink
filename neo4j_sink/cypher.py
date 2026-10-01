@@ -354,7 +354,7 @@ _NOTICE_FIELDS: tuple[str, ...] = (
     # graph, not a rescan; plus the ids of the rules that fired.
     "award_date_raw", "tender_result_award_date_raw",
     "tender_reference", "notice_language", "eforms_sdk", "value_raw",
-    "cleaning_rules",
+    "tenders_received_raw", "cleaning_rules",
     # Framework agreements (C6). Declared in cleaning.py next to the
     # CALL_OFF_OF edge built from the same key — see there for what
     # framework_id is and what may not be read out of it.
@@ -368,8 +368,8 @@ _NOTICE_FIELDS: tuple[str, ...] = (
 _NOTICE_ONLY_FIELDS = frozenset({
     "notice_type", "modifies_publication_number",
     "notice_version", "modifies_notice_id",
-    "award_date_raw", "tender_result_award_date_raw",
-    "tender_reference", "notice_language", "eforms_sdk", "value_raw",
+    "award_date_raw", "tender_result_award_date_raw", "tender_reference",
+    "notice_language", "eforms_sdk", "value_raw", "tenders_received_raw",
 })
 
 # Edge props carried per parties[] item onto AWARDED_TO / BID_ON.
@@ -412,13 +412,14 @@ def _value_clears(p: dict) -> "list[str] | None":
 
 def _contract_clears(p: dict) -> "list[str] | None":
     """All props to REMOVE for this contract emit: the value-quality
-    clears plus a corrupt non-positive tenders_received (a bidder COUNT
-    is >= 1; 0/negative is broken parsing and must not linger —
-    values.contract_bidder_count_positive)."""
+    clears plus a bidder count this emit does not stand behind — a
+    non-positive one (values.contract_bidder_count_positive), or none at
+    all on a cleaned emit (``cleaning_rules`` present, even empty): the
+    cleaning stage withholds 999 and money typed into the field
+    (2,416,436 on 148462-2026), and an older stored count must go."""
     clears = list(_value_clears(p) or [])
-    tenders = p.get("tenders_received")
-    if (tenders is not None and tenders <= 0
-            and "tenders_received" not in clears):
+    t = p.get("tenders_received")
+    if (t <= 0 if t is not None else "cleaning_rules" in p) and "tenders_received" not in clears:
         clears.append("tenders_received")
     return clears or None
 

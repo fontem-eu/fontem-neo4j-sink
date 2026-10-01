@@ -518,6 +518,51 @@ def test_nonpositive_tenders_cleared_on_entity_and_notice():
     assert contract.set_props["tenders_received"] is None
 
 
+def test_a_withheld_bidder_count_clears_the_stored_one():
+    """The cleaning stage withheld the count (148462-2026 published
+    2,416,436): the emit carries cleaning_rules and the raw figure but no
+    tenders_received, and the value an older emit stored must go from
+    both the :Notice and the entity, or the re-emit fixes nothing."""
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
+        value_quality_flag="ok", tenders_received=None,
+        tenders_received_raw=2416436,
+        cleaning_rules=["generic.bidder_count_impossible"],
+    ))
+    assert "tenders_received" in (notice.clear_props or [])
+    assert notice.set_props["tenders_received_raw"] == 2416436
+    assert contract.set_props["tenders_received"] is None
+    # The published figure is what ONE notice printed: notice-only.
+    assert "tenders_received_raw" not in contract.set_props
+
+
+def test_a_cleaned_emit_that_publishes_no_count_clears_a_stale_one():
+    """An empty cleaning_rules still marks a cleaned reading."""
+    notice, _contract, _chain = render_upsert_contract(_new_model_payload(
+        value_quality_flag="ok", tenders_received=None, cleaning_rules=[],
+    ))
+    assert "tenders_received" in (notice.clear_props or [])
+
+
+def test_an_emit_from_before_the_cleaning_stage_clears_no_count():
+    """No cleaning_rules: not a statement about the count (a replay of an
+    old event, a rollup partial)."""
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
+        value_quality_flag="ok", tenders_received=None,
+    ))
+    assert "tenders_received" not in (notice.clear_props or [])
+    assert "tenders_received" not in contract.set_props
+
+
+def test_a_cleaned_count_is_kept():
+    notice, contract, _chain = render_upsert_contract(_new_model_payload(
+        value_quality_flag="ok", tenders_received=3, tenders_received_raw=325350,
+        cleaning_rules=["generic.bidder_count_impossible"],
+    ))
+    assert notice.set_props["tenders_received"] == 3
+    assert "tenders_received" not in (notice.clear_props or [])
+    assert contract.set_props["tenders_received"] == 3
+
+
 # ── stub lifecycle ────────────────────────────────────────────────
 
 
