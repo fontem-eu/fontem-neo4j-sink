@@ -445,6 +445,7 @@ def test_renderer_registry_covers_all_event_types():
         "UpsertPetition", "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "TranslateAuthorityName", "UpsertContract",
         "TranslateContractTitle", "TranslateDisclosureTitle",
+        "SummarizePetitionObjectives", "TranslateDisclosureText", "SummarizeDisclosureText",
         "UpsertFrameworkAgreement",
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
