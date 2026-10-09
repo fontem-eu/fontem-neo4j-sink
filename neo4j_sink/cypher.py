@@ -32,6 +32,8 @@ from neo4j_sink.identity import (
 # Re-exported: CypherWrite lived here until identity.py needed it
 # too, and every caller and test imports it from this module.
 from neo4j_sink.chain import render_contract_chain
+from neo4j_sink import text_derivations
+from neo4j_sink.petitions import render_upsert_petition
 from neo4j_sink import translations as title_translations
 from neo4j_sink.writes import CypherWrite
 
@@ -926,28 +928,6 @@ def render_upsert_exchange_rate(p: dict) -> CypherWrite:
     )
 
 
-def render_upsert_petition(p: dict) -> CypherWrite:
-    """Public petition keyed by (system, petition_id) — e.g. the EU
-    Citizens' Initiative register. Organizer names arrive as parallel
-    arrays (names/roles/countries); emails never reach the platform."""
-    set_props = {
-        k: p[k] for k in (
-            "title", "status", "objectives", "registration_date",
-            "collection_start_date", "collection_deadline", "closed_date",
-            "submitted_date", "answered_date", "total_supporters",
-            "support_link", "organizer_names", "organizer_roles",
-            "organizer_countries", "funding_total_eur",
-            "funding_sponsor_count", "registration_decision_celex",
-            "answer_refs", "latest_update",
-        ) if p.get(k) is not None
-    }
-    return CypherWrite(
-        label="Petition",
-        primary_key={"system": p["system"], "petition_id": p["petition_id"]},
-        set_props=set_props,
-    )
-
-
 RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
@@ -961,6 +941,9 @@ RENDERERS: dict[str, Callable[[dict], CypherWrite] | None] = {
     "TranslateAuthorityName": render_translate_authority_name,
     "TranslateContractTitle": title_translations.render_translate_contract_title,
     "TranslateDisclosureTitle": title_translations.render_translate_disclosure_title,
+    "SummarizePetitionObjectives": text_derivations.render_summarize_petition_objectives,
+    "TranslateDisclosureText": text_derivations.render_translate_disclosure_text,
+    "SummarizeDisclosureText": text_derivations.render_summarize_disclosure_text,
     "UpsertContract": render_upsert_contract,
     "UpsertFrameworkAgreement": render_upsert_framework_agreement,
     "UpsertTaxonomyCode": render_upsert_taxonomy_code,

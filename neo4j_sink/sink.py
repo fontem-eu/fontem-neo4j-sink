@@ -23,7 +23,7 @@ from fontem_events import EventConsumer
 from neo4j import GraphDatabase
 from neo4j import exceptions as neo4j_exceptions
 
-from . import translations
+from . import text_derivations, translations
 from .chain import apply_contract_chains
 from .cypher import RENDERERS, CypherWrite, label_for_graph
 
@@ -380,9 +380,11 @@ class Neo4jSink(EventConsumer):
         typed_rels = [w for w in writes if w.label == "_Relationship"]
         chains = [w for w in writes if w.label == "_ContractChain"]
         titles = [w for w in writes if w.label == translations.LABEL]
+        derived = [w for w in writes if w.label == text_derivations.LABEL]
         nodes = [w for w in writes
                  if w.label not in ("_SameAs", "_NotSameAs", "_Relationship",
-                                    "_ContractChain", translations.LABEL)]
+                                    "_ContractChain", translations.LABEL,
+                                    text_derivations.LABEL)]
         rel_items = self._flush_nodes(nodes)
         self._flush_extra_relationships(rel_items)
         # After the NOTICE_OF edges: the chain step needs the notice, its
@@ -392,6 +394,10 @@ class Neo4jSink(EventConsumer):
         # to the title the entity shows once this batch has landed.
         if titles:
             translations.apply_title_translations(self._driver, titles)
+        # Likewise a summary or translation of a longer text: it applies to
+        # the text the entity holds once this batch has landed.
+        if derived:
+            text_derivations.apply_text_derivations(self._driver, derived)
         self._flush_typed_relationships(typed_rels)
         # SameAs before NotSameAs: within one batch a retraction must be
         # able to delete an assertion made earlier in the same batch, and
@@ -677,6 +683,9 @@ class Neo4jSink(EventConsumer):
             return
         if w.label == translations.LABEL:
             translations.apply_title_translations(self._driver, [w])
+            return
+        if w.label == text_derivations.LABEL:
+            text_derivations.apply_text_derivations(self._driver, [w])
             return
         if w.label == "_SameAs":
             self._apply_same_as(w)
